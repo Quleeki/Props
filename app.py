@@ -184,17 +184,18 @@ edited_df = st.data_editor(
     grid_df,
     column_config={
         "Select": st.column_config.CheckboxColumn(required=True),
-        "GameTime": st.column_config.DatetimeColumn("Game Time", format="ddd, MMM D — h:mm A"),
-        "CoversLine": st.column_config.NumberColumn("Covers Line", format="%.1f"),
-        "SportsbookOdds": st.column_config.NumberColumn("Sportsbook Odds", format="%+d"),
-        "ModelFairOdds": st.column_config.NumberColumn("Model Fair Odds", format="%+d"),
+        "GameTime": st.column_config.DatetimeColumn("Time", format="ddd h:mma"),
+        "Position": st.column_config.TextColumn("POS"),
+        "CoversLine": st.column_config.NumberColumn("Line", format="%.1f"),
+        "SportsbookOdds": st.column_config.NumberColumn("SB Odds", format="%+d"),
+        "ModelFairOdds": st.column_config.NumberColumn("Model", format="%+d"),
         "EdgePct": st.column_config.NumberColumn("Edge %", format="%.1f%%"),
         "PropType": st.column_config.TextColumn("Prop Type"),
         "InjuryStatus": st.column_config.TextColumn("Injury Status"),
     },
     disabled=[c for c in grid_df.columns if c != "Select"],
     hide_index=True,
-    use_container_width=True,
+    width="stretch",
     key="props_grid",
 )
 
