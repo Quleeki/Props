@@ -1,0 +1,31 @@
+﻿
+  mlb.html:2371:
+  mlb.html:2372:    <div class="profile-avatar profile-avatar-lg me-2 position-relative bg-light d-flex flex-row 
+justify-content-center align-items-center">
+  mlb.html:2373:            <img 
+src="https://cdn.imagn.com/image/thumb/250-250nw/28523475.png?auto=compress&amp;auto=format&amp;width=44&amp;height=44"
+> mlb.html:2374:                 alt="Miguel Vargas logo"
+  mlb.html:2375:                 width="44"
+  mlb.html:2376:                 height="44"
+  mlb.html:2377:                 class="rounded-circle bg-light"
+  mlb.html:2378:                 onerror="this.outerHTML = '<span class=\'avatar-initials rounded-circle 
+bg-light\'>MV</span>';"
+  mlb.html:2379:                 />
+  mlb.html:2380:        <div class="position-absolute top-100 start-100 translate-middle p-1 rounded-circle shadow-md 
+bg-white">
+  mlb.html:2381:			
+  mlb.html:2382:    <span class="teams-component small lh-1">
+  mlb.html:2383:            <img src="https://img.covers.com/covers/data/svg_logos/mlb/chw.svg" alt="Chicago White Sox 
+logo" class="" width="16" height="16" loading="lazy" decoding="async"
+  mlb.html:2384:             onerror="this.outerHTML = '<span class=\'profile-avatar profile-avatar-lg\'><span 
+class=\'avatar-initials rounded-circle bg-light me-1\'>CH</span></span>';"
+  mlb.html:2385:            />
+  mlb.html:2386:    </span>
+  mlb.html:2387:
+  mlb.html:2388:        </div>
+  mlb.html:2389:    </div>
+  mlb.html:2390:
+  mlb.html:2391:			<div class="category-title d-flex flex-column gap-2 fs-11 pt-lg-2 lh-1">
+  mlb.html:2392:				<span class="category fw-bold">
+
+

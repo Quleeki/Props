@@ -5,30 +5,50 @@ Live player-prop scraper for:
     NFL  -> https://www.covers.com/sport/football/nfl/player-props
     NCAAF/CFB -> https://www.covers.com/sport/football/ncaaf/player-props
 
-IMPORTANT - please read before relying on this in production:
+Covers.com renders its prop cards server-side (no hidden API call needed)
+using a card-based layout, NOT html <table> tags and NOT a Next.js
+__NEXT_DATA__ blob. Each prop card looks roughly like:
 
-This sandbox environment has no outbound internet access to covers.com, so
-this module was written defensively from general knowledge of how sites
-like this are typically built (Next.js apps that embed a JSON payload in a
-`<script id="__NEXT_DATA__">` tag, with an HTML table as a progressive-
-enhancement fallback) rather than against the live DOM. It has NOT been
-verified against the real page.
+    <div class="category-title ...">
+        <a class="player-link" href="/sport/.../players/194249/miguel-vargas">M. Vargas</a>
+        <span class="player-position"> (3B)</span>
+        <span class="prediction ...">0.5 Total RBIs</span>
+    </div>
+    ...
+    <div class="best-odd-container ...">
+        <a class="deeplink" data-tracking='{"text":"ATL vs CHW, Thu, Aug 20 • 2:10 PM ET",
+                                             "elementText":"o0.5 +171 draftkings"}' ...>
+            <b>o0.5</b> +171
+        </a>
+        <button data-bs-target="#120636756-proj-odds" ...>...</button>
+    </div>
+    <div id="120636756-proj-odds" class="tab-pane ... compare-odds-table">
+        <div class="compare-odds-column">
+            <img class="sportsbook-logo" alt="BetMGM logo" ...>
+            <a class="book-odds" data-tracking='{"elementText":"o0.5 +160 + betmgm", ...}'>...</a>
+        </div>
+        ... (one .compare-odds-column per additional sportsbook)
+    </div>
 
-Before you rely on it:
-  1. Run `python scraper.py --debug` on a machine with real internet access.
-     This saves the raw HTML for each league to ./debug_html/ and prints
-     how many rows each parsing strategy found.
-  2. Open debug_html/nfl.html in a browser or text editor, search for a
-     player name you know is currently listed, and see which parsing
-     strategy (JSON payload vs. HTML table) actually contains the data.
-  3. Adjust JSON_KEY_ALIASES / the table-parsing selectors below to match
-     what you find. This is the one part of the project that will need
-     hands-on iteration once real data is live on the page, since site
-     markup can't be reverse-engineered without fetching it.
+_parse_prop_cards() below targets exactly this structure -- confirmed
+against a real saved copy of the MLB player-props page (NFL/NCAAF render
+the same way, they just have no props posted yet for the upcoming slate).
+The matchup + kickoff time and the over/under + line + odds + sportsbook
+for every book comparison are all recovered from the `data-tracking`
+JSON attribute on each odds link, which is far more reliable than trying
+to parse the visible text/CSS layout directly.
+
+A couple of older, more speculative parsing strategies (_parse_next_data /
+_parse_html_tables) are kept as fallbacks in case Covers changes their
+markup again, but _parse_prop_cards is the primary, verified path.
+
+Run `python scraper.py --debug` to save the raw HTML for each league to
+./debug_html/ and see row counts from each parsing strategy -- handy if
+Covers tweaks their markup again in the future.
 
 The app (app.py) calls fetch_all_props() and gracefully falls back to
-sample_data.py if this returns no rows, so the dashboard is always usable
-even before the scraper is fully dialed in.
+sample_data.py if this returns no rows (e.g. NFL/NCAAF simply have no
+props posted yet), so the dashboard is always usable either way.
 """
 
 from __future__ import annotations
@@ -43,6 +63,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from dateutil import parser as dateutil_parser
 
 COVERS_URLS = {
     "NFL": "https://www.covers.com/sport/football/nfl/player-props",
@@ -193,6 +214,170 @@ def _parse_html_tables(html: str) -> list[dict]:
     return rows
 
 
+# Matches data-tracking "elementText" values like "o0.5 +171 draftkings"
+# (best-odds block) or "o0.5 +160 + betmgm" (compare-odds block, which adds
+# a stray "+" separator before the sportsbook slug -- the optional \+?\s*
+# absorbs that): (o|u) side, line, American odds, sportsbook slug.
+_ELEMENT_TEXT_RE = re.compile(r"^([ou])\s*([\d.]+)\s*([+\-]\d+)\s+\+?\s*(.+)$", re.IGNORECASE)
+
+# Matches data-tracking "text" values like
+# "ATL vs CHW, Thu, Aug 20 • 2:10 PM ET" -> team, opponent, date/time.
+_MATCHUP_TEXT_RE = re.compile(r"^(\S+)\s+vs\s+(\S+),\s*(.+)$")
+
+# Friendlier display names for known sportsbook slugs; anything not listed
+# here falls back to .title() (e.g. "unknownbook" -> "Unknownbook").
+_SPORTSBOOK_NAME_MAP = {
+    "draftkings": "DraftKings",
+    "fanduel": "FanDuel",
+    "betmgm": "BetMGM",
+    "caesars": "Caesars",
+    "bet365": "Bet365",
+    "betrivers": "BetRivers",
+    "espnbet": "ESPN BET",
+    "fanatics": "Fanatics",
+    "wynnbet": "WynnBET",
+    "pointsbet": "PointsBet",
+}
+
+
+def _format_sportsbook_name(slug: str) -> str:
+    key = slug.strip().lower()
+    return _SPORTSBOOK_NAME_MAP.get(key, slug.strip().title())
+
+
+def _parse_prop_cards(html: str, league: str) -> list[dict]:
+    """Primary parser: extract prop rows from Covers' server-rendered
+    div-based prop cards (see module docstring for the confirmed markup
+    shape). Returns one row per (player, prop, sportsbook) combination."""
+    soup = BeautifulSoup(html, "lxml")
+    rows: list[dict] = []
+
+    for category_title in soup.find_all("div", class_="category-title"):
+        player_link = category_title.find("a", class_="player-link")
+        if not player_link:
+            continue
+        player_name = player_link.get_text(strip=True)
+
+        position_tag = category_title.find("span", class_="player-position")
+        position = position_tag.get_text(strip=True).strip("() ") if position_tag else ""
+
+        prediction_tag = category_title.find("span", class_="prediction")
+        prediction_text = prediction_tag.get_text(strip=True) if prediction_tag else ""
+        line_match = re.match(r"^([\d.]+)\s+(.*)$", prediction_text)
+        if line_match:
+            fallback_line = float(line_match.group(1))
+            prop_type = line_match.group(2).strip()
+        else:
+            fallback_line = None
+            prop_type = prediction_text
+
+        # Walk up from the category-title looking for the ancestor "card"
+        # div that also contains a .best-odd-container -- that's our
+        # anchor for finding this specific player's odds links.
+        card = None
+        node = category_title.find_parent("div")
+        for _ in range(5):
+            if node is None:
+                break
+            if node.find("div", class_="best-odd-container"):
+                card = node
+                break
+            node = node.find_parent("div")
+
+        odds_links = []
+        if card is not None:
+            best_odds = card.find("div", class_="best-odd-container")
+            if best_odds:
+                odds_links.extend(best_odds.find_all("a", attrs={"data-tracking": True}))
+
+            # The full odds-comparison table lives OUTSIDE the card as a
+            # sibling, linked only by a shared id (e.g. "#120636756-proj-
+            # odds") referenced from an expand button's data-bs-target --
+            # so look it up globally by id rather than assuming nesting.
+            expand_btn = card.find("button", attrs={"data-bs-target": True})
+            if expand_btn:
+                target = expand_btn.get("data-bs-target", "")
+                if target.startswith("#"):
+                    compare_div = soup.find(id=target[1:])
+                    if compare_div:
+                        odds_links.extend(
+                            compare_div.find_all("a", attrs={"data-tracking": True})
+                        )
+
+        matchup_text = ""
+        book_rows = []
+        seen = set()
+        for link in odds_links:
+            tracking_raw = link.get("data-tracking", "")
+            try:
+                tracking = json.loads(tracking_raw)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            element_text = tracking.get("elementText", "")
+            m = _ELEMENT_TEXT_RE.match(element_text)
+            if not m:
+                continue
+            side, line_str, odds_str, book_slug = m.groups()
+            try:
+                odds_val = int(odds_str)
+            except ValueError:
+                continue
+
+            if not matchup_text and tracking.get("text"):
+                matchup_text = tracking["text"]
+
+            dedupe_key = (book_slug.strip().lower(), side.lower(), odds_val)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            book_rows.append(
+                {
+                    "side": "Over" if side.lower() == "o" else "Under",
+                    "line": float(line_str),
+                    "odds": odds_val,
+                    "sportsbook": _format_sportsbook_name(book_slug),
+                }
+            )
+
+        if not book_rows:
+            continue  # couldn't recover any priced odds for this card
+
+        team = opponent = game_time_raw = ""
+        game_time_iso = None
+        mm = _MATCHUP_TEXT_RE.match(matchup_text) if matchup_text else None
+        if mm:
+            team, opponent, game_time_raw = mm.groups()
+            try:
+                game_time_iso = dateutil_parser.parse(game_time_raw, fuzzy=True)
+            except (ValueError, OverflowError, TypeError):
+                game_time_iso = None
+
+        for book in book_rows:
+            rows.append(
+                {
+                    "League": league,
+                    "Position": position,
+                    "Player": player_name,
+                    "Team": team,
+                    "Opponent": opponent,
+                    "Matchup": f"vs {opponent}" if opponent else "",
+                    "GameTime": game_time_iso.isoformat() if game_time_iso else game_time_raw,
+                    "PropType": f"{prop_type} ({book['side']})" if prop_type else book["side"],
+                    "CoversLine": book["line"] if book["line"] is not None else fallback_line,
+                    "SportsbookOdds": book["odds"],
+                    "Sportsbook": book["sportsbook"],
+                    "ModelFairOdds": book["odds"],
+                    "EdgePct": 0.0,
+                    "InjuryStatus": "",
+                    "DataSource": "COVERS",
+                }
+            )
+
+    return rows
+
+
 def _normalize_row(raw: dict, league: str) -> dict | None:
     """Map a best-effort-extracted raw dict onto our standard schema.
     Returns None if we can't find the minimum required fields."""
@@ -244,20 +429,26 @@ def fetch_covers_props(league: str, save_debug_html: bool = False) -> list[dict]
         debug_dir.mkdir(exist_ok=True)
         (debug_dir / f"{league.lower()}.html").write_text(html, encoding="utf-8")
 
+    # Primary strategy: Covers' real server-rendered div/card markup.
+    card_rows = _parse_prop_cards(html, league)
+    if card_rows:
+        return card_rows
+
+    # Fallback 1: Next.js-style embedded JSON, in case a page uses that
+    # pattern instead (kept for resilience against future markup changes).
     json_rows = _parse_next_data(html)
     normalized = [r for r in (_normalize_row(r, league) for r in json_rows) if r]
     if normalized:
         return normalized
 
-    # Fall back to raw table extraction. These rows are NOT normalized to
-    # the final schema (we don't know the column order yet) -- they're
-    # surfaced so you can inspect them with --debug and wire up real
-    # column mapping once you see the structure.
+    # Fallback 2: raw <table> extraction (unlikely to hit on this site, but
+    # cheap to keep around). These rows are NOT normalized to the final
+    # schema -- they're surfaced so you can inspect them with --debug.
     table_rows = _parse_html_tables(html)
     if table_rows:
         print(
             f"[scraper] {league}: found {len(table_rows)} raw table row(s) but no "
-            "JSON payload -- table parsing needs column mapping, see --debug output.",
+            "card/JSON data -- table parsing needs column mapping, see --debug output.",
             file=sys.stderr,
         )
     return []
@@ -293,7 +484,9 @@ if __name__ == "__main__":
         print(result.head(10).to_string(index=False))
     else:
         print(
-            "No rows parsed. If --debug was passed, inspect ./debug_html/*.html "
-            "and update JSON_KEY_ALIASES / _parse_html_tables in scraper.py to match "
-            "the real markup."
+            "No rows parsed -- most likely Covers just hasn't posted props for these "
+            "leagues yet (common before a season's Week 1). If --debug was passed and "
+            "you're sure props ARE live on the site right now, inspect ./debug_html/*.html "
+            "for a '.category-title' div and compare it against the markup shape documented "
+            "at the top of scraper.py; Covers may have changed their layout again."
         )
