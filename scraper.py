@@ -70,6 +70,13 @@ COVERS_URLS = {
     "CFB": "https://www.covers.com/sport/football/ncaaf/player-props",
 }
 
+# Only these sportsbooks' odds are kept from live scrapes -- everything else
+# Covers lists (FanDuel, Caesars, etc.) is silently dropped. Match against
+# the lowercased, space-stripped slug Covers uses in its data-tracking
+# attributes (see _format_sportsbook_name below for the slug -> display-name
+# mapping). Edit this set to change which books show up in the app.
+PREFERRED_SPORTSBOOKS = {"draftkings", "betmgm", "bet365", "thescore", "thescorebet"}
+
 REQUEST_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -237,6 +244,8 @@ _SPORTSBOOK_NAME_MAP = {
     "fanatics": "Fanatics",
     "wynnbet": "WynnBET",
     "pointsbet": "PointsBet",
+    "thescore": "theScore Bet",
+    "thescorebet": "theScore Bet",
 }
 
 
@@ -323,6 +332,10 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                 odds_val = int(odds_str)
             except ValueError:
                 continue
+
+            book_key = re.sub(r"[^a-z0-9]", "", book_slug.strip().lower())
+            if book_key not in PREFERRED_SPORTSBOOKS:
+                continue  # not one of your preferred books -- skip it
 
             if not matchup_text and tracking.get("text"):
                 matchup_text = tracking["text"]
