@@ -37,11 +37,21 @@ the ticket at the bottom updates live.
 - `https://www.covers.com/sport/football/nfl/player-props`
 - `https://www.covers.com/sport/football/ncaaf/player-props`
 
-**This sandbox has no outbound internet access to covers.com**, so the
-scraper was written defensively (it tries to read a Next.js-style embedded
-JSON payload first, then falls back to generic HTML table parsing) but has
-**not been verified against the real page**. When you run it somewhere with
-normal internet access:
+**Update:** the scraper's parsing logic has been verified against a real,
+live saved copy of Covers' MLB player-props page (which had live data,
+unlike NFL/NCAAF at time of writing — Week 1 props hadn't posted yet).
+Covers server-renders each prop as a `.category-title` "card" with a
+`.best-odd-container` for the top line and a linked `.compare-odds-table`
+for the rest of the sportsbooks — see the full breakdown in the comment
+block at the top of `scraper.py`. This is a stable, non-JS-rendered
+structure (no hidden API call needed), and `_parse_prop_cards()` targets it
+directly. It correctly extracted player, position, matchup, kickoff time,
+prop type/line, and odds across all 3 sportsbooks on the real test card.
+
+Since NFL/NCAAF render the same way MLB does, this should "just work" the
+moment Covers posts real Week 1 props — no further changes should be
+needed. If it ever comes back empty despite props clearly being live on
+the site, Covers likely changed their markup again; re-run:
 
 ```bash
 python scraper.py --debug
@@ -49,18 +59,17 @@ python scraper.py --debug
 
 This saves the raw HTML to `debug_html/nfl.html` and `debug_html/cfb.html`
 and prints how many rows each parsing strategy found. Open those files,
-find a player prop you recognize, and see where its data actually lives in
-the markup. Then adjust `JSON_KEY_ALIASES` (or the table-parsing logic) near
-the top of `scraper.py` to match. This is the one piece of the project that
-needs a short hands-on iteration once real lines are posted, since the
-exact page structure can't be reverse-engineered without fetching it.
+find a player prop you recognize, and compare the surrounding HTML against
+the structure documented at the top of `scraper.py`, then adjust
+`_parse_prop_cards()` (or the older `JSON_KEY_ALIASES`/table-parsing
+fallbacks) to match whatever changed.
 
-Until the scraper is dialed in — or whenever Covers has no props posted yet
-for the upcoming slate (common in the offseason, which is where things
-stand as of writing) — the app automatically falls back to the bundled
-sample data in `sample_data.py` and shows a banner saying so. Nothing about
-the dashboard's filtering/sorting/parlay logic changes based on which data
-source is active; they share the exact same schema.
+Until then — or whenever Covers simply has no props posted yet for the
+upcoming slate (the case for NFL/NCAAF as of writing) — the app
+automatically falls back to the bundled sample data in `sample_data.py` and
+shows a banner saying so. Nothing about the dashboard's filtering/sorting/
+parlay logic changes based on which data source is active; they share the
+exact same schema.
 
 ### Optional: JS rendering via ScrapingBee
 
