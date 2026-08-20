@@ -25,7 +25,7 @@ from parlay import american_to_prob, prob_to_american
 # Fixed seed so the demo dataset is stable/reproducible between runs.
 _RNG = random.Random(42)
 
-SPORTSBOOKS = ["DraftKings", "FanDuel", "BetMGM", "Caesars"]
+SPORTSBOOKS = ["DraftKings", "BetMGM", "Bet365", "theScore Bet"]
 INJURY_STATUSES = ["Healthy", "Healthy", "Healthy", "Probable", "Questionable", "Doubtful"]
 
 # (League, Position, Player, Team, Opponent, HomeAway, GameTime, PropType, Line, BaseOdds)
