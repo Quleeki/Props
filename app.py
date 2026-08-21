@@ -14,7 +14,7 @@ import streamlit as st
 
 import sample_data
 import scraper
-from parlay import format_american, price_parlay
+from parlay import best_book_parlay, format_american, price_parlay
 
 st.set_page_config(page_title="EdgeFinder: Prop Dashboard & Parlay Builder", layout="wide")
 
@@ -24,8 +24,7 @@ DISPLAY_COLUMNS = [
     "League",
     "Position",
     "Player",
-    "Team",
-    "Matchup",
+    "Game",
     "PropType",
     "CoversLine",
     "SportsbookOdds",
@@ -34,16 +33,6 @@ DISPLAY_COLUMNS = [
     "EdgePct",
     "InjuryStatus",
 ]
-
-COLUMN_LABELS = {
-    "GameTime": "Game Time",
-    "CoversLine": "Covers Line",
-    "SportsbookOdds": "Sportsbook Odds",
-    "ModelFairOdds": "Model Fair Odds",
-    "EdgePct": "Edge %",
-    "PropType": "Prop Type",
-    "InjuryStatus": "Injury Status",
-}
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +122,7 @@ sort_label_map = {
     "Sportsbook Odds": "SportsbookOdds",
     "Position": "Position",
     "Game Time": "GameTime",
+    "Game": "Game",
 }
 sort_label = st.sidebar.selectbox("Sort by", options=list(sort_label_map.keys()))
 sort_ascending = st.sidebar.radio("Direction", options=["Descending", "Ascending"]) == "Ascending"
@@ -153,12 +143,16 @@ correlation_multiplier = st.sidebar.slider(
 # ---------------------------------------------------------------------------
 # Apply filters
 # ---------------------------------------------------------------------------
-working_df = apply_longshot_filter(df, enforce_cap)
-working_df = working_df[
-    working_df["League"].isin(selected_leagues)
-    & working_df["Position"].isin(selected_positions)
-    & working_df["PropType"].isin(selected_props)
-    & working_df["Sportsbook"].isin(selected_books)
+# capped_df keeps the WR/RB +125 rule (a data-integrity rule) but NOT the
+# view-only sidebar filters below -- it's the search space for "which
+# sportsbook has every selected leg", so an unrelated league/position/book
+# filter toggle doesn't hide a book that actually has your full parlay.
+capped_df = apply_longshot_filter(df, enforce_cap)
+working_df = capped_df[
+    capped_df["League"].isin(selected_leagues)
+    & capped_df["Position"].isin(selected_positions)
+    & capped_df["PropType"].isin(selected_props)
+    & capped_df["Sportsbook"].isin(selected_books)
 ]
 if player_search.strip():
     working_df = working_df[
@@ -186,6 +180,7 @@ edited_df = st.data_editor(
         "Select": st.column_config.CheckboxColumn(required=True),
         "GameTime": st.column_config.DatetimeColumn("Time", format="ddd h:mma"),
         "Position": st.column_config.TextColumn("POS"),
+        "Game": st.column_config.TextColumn("Game"),
         "CoversLine": st.column_config.NumberColumn("Line", format="%.1f"),
         "SportsbookOdds": st.column_config.NumberColumn("SB Odds", format="%+d"),
         "ModelFairOdds": st.column_config.NumberColumn("Model", format="%+d"),
@@ -216,7 +211,7 @@ else:
 
     st.write(
         full_selected[
-            [c for c in ["GameTime", "Player", "Team", "Matchup", "PropType",
+            [c for c in ["GameTime", "Player", "Game", "PropType",
                          "CoversLine", "SportsbookOdds", "ModelFairOdds", "EdgePct"]
             if c in full_selected.columns]
         ]
@@ -248,6 +243,36 @@ else:
             + "; ".join(
                 f"{', '.join(g['players'])}" for g in correlated_groups
             )
+        )
+
+    # ---- Which single sportsbook has the best price for THIS exact combo ----
+    best = best_book_parlay(capped_df, full_selected, odds_col="SportsbookOdds")
+    if best["has_complete_book"]:
+        winner = best["best"]
+        st.success(
+            f"🏦 Best single-book parlay: **{winner['sportsbook']}** at "
+            f"{format_american(winner['combined_american'])} -- all {len(full_selected)} "
+            "selected legs are available there.",
+            icon="🏆",
+        )
+        if len(best["all_books"]) > 1:
+            with st.expander("Compare every sportsbook that carries all selected legs"):
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {"Sportsbook": r["sportsbook"], "Combined Odds": format_american(r["combined_american"])}
+                            for r in best["all_books"]
+                        ]
+                    ),
+                    hide_index=True,
+                    width="stretch",
+                )
+    else:
+        st.info(
+            "No single sportsbook currently prices every selected leg -- the 'Sportsbook "
+            "Parlay Payout' above mixes each leg's own book. Try a combination where all "
+            "legs share at least one common sportsbook to see a same-book comparison.",
+            icon="ℹ️",
         )
 
 st.divider()
