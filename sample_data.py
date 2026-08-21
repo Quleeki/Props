@@ -80,11 +80,33 @@ def _edge_and_fair_odds(covers_odds: int) -> tuple[float, int]:
     return round(edge_pct, 1), fair_odds
 
 
+def _jitter_odds(base_odds: int) -> int:
+    """
+    Simulate one sportsbook's own price for a prop, as a small random
+    variation around a 'consensus' base price -- real books rarely agree to
+    the penny. Keeps the same side of the line (won't flip a favorite into
+    an underdog or vice versa).
+    """
+    delta = _RNG.randint(-15, 15)
+    jittered = base_odds + delta
+    if base_odds > 0 and jittered <= 0:
+        jittered = 100
+    elif base_odds < 0 and jittered >= 0:
+        jittered = -100
+    return jittered
+
+
 def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
     """
     Build the demo DataFrame, optionally restricted to a subset of leagues
     (e.g. ["NFL"] or ["CFB"]). Matches the schema produced by scraper.py so
     the app can treat live and sample data identically.
+
+    Each prop is priced at 2-4 of the sportsbooks in SPORTSBOOKS (not just
+    one) -- exactly like scraper.py does with real Covers.com data -- so
+    that "which single sportsbook has every leg in my parlay" has real
+    cross-book data to compare against instead of each prop only ever
+    existing at one, randomly-assigned book.
     """
     rows = []
     for (
@@ -102,8 +124,6 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
         if leagues and league not in leagues:
             continue
 
-        edge_pct, fair_odds = _edge_and_fair_odds(base_odds)
-        sportsbook = SPORTSBOOKS[_RNG.randrange(len(SPORTSBOOKS))]
         injury = INJURY_STATUSES[_RNG.randrange(len(INJURY_STATUSES))]
         # Skill-position injuries are more newsworthy than steady vets;
         # keep most rows healthy but leave some variety in for realism.
@@ -116,25 +136,37 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
             away_team, home_team = opponent, team
         game = f"{away_team} @ {home_team}"
 
-        rows.append(
-            {
-                "League": league,
-                "Position": position,
-                "Player": player,
-                "Team": team,
-                "Opponent": opponent,
-                "Game": game,
-                "GameTime": game_time,
-                "PropType": prop_type,
-                "CoversLine": line,
-                "SportsbookOdds": base_odds,
-                "Sportsbook": sportsbook,
-                "ModelFairOdds": fair_odds,
-                "EdgePct": edge_pct,
-                "InjuryStatus": injury,
-                "DataSource": "SAMPLE",
-            }
-        )
+        # Which books carry this prop -- weighted toward 2-3 books so it's
+        # common (but not universal) for a prop to be missing from any one
+        # given book, same as real sportsbooks.
+        available_books = list(SPORTSBOOKS)
+        _RNG.shuffle(available_books)
+        n_books = _RNG.choice([2, 2, 3, 3, 4])
+        available_books = available_books[:n_books]
+
+        for sportsbook in available_books:
+            book_odds = _jitter_odds(base_odds)
+            edge_pct, fair_odds = _edge_and_fair_odds(book_odds)
+
+            rows.append(
+                {
+                    "League": league,
+                    "Position": position,
+                    "Player": player,
+                    "Team": team,
+                    "Opponent": opponent,
+                    "Game": game,
+                    "GameTime": game_time,
+                    "PropType": prop_type,
+                    "CoversLine": line,
+                    "SportsbookOdds": book_odds,
+                    "Sportsbook": sportsbook,
+                    "ModelFairOdds": fair_odds,
+                    "EdgePct": edge_pct,
+                    "InjuryStatus": injury,
+                    "DataSource": "SAMPLE",
+                }
+            )
 
     df = pd.DataFrame(rows)
     if not df.empty:
