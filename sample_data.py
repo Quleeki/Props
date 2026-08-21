@@ -108,6 +108,14 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
         # Skill-position injuries are more newsworthy than steady vets;
         # keep most rows healthy but leave some variety in for realism.
 
+        # "Game" is always displayed as "Away @ Home" -- home_away tells us
+        # whether the player's own Team is the home or away side.
+        if home_away == "@":
+            away_team, home_team = team, opponent
+        else:
+            away_team, home_team = opponent, team
+        game = f"{away_team} @ {home_team}"
+
         rows.append(
             {
                 "League": league,
@@ -115,7 +123,7 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
                 "Player": player,
                 "Team": team,
                 "Opponent": opponent,
-                "Matchup": f"{home_away} {opponent}",
+                "Game": game,
                 "GameTime": game_time,
                 "PropType": prop_type,
                 "CoversLine": line,
