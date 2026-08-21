@@ -3,8 +3,9 @@ EdgeFinder: NFL + CFB Player Prop Dashboard & Parlay Builder
 
 Pulls player prop lines (live from Covers.com when available, falling back
 to bundled sample data otherwise), filters out WR/RB longshots priced worse
-than +125, lets you filter/sort the slate, and prices a live parlay ticket
--- including a same-game correlation boost -- as you check rows.
+than +125, lets you filter/sort/search the slate, and prices a live parlay
+ticket -- including a same-game correlation boost -- as you check rows or
+remove them directly from the ticket.
 """
 
 from __future__ import annotations
@@ -63,6 +64,10 @@ def apply_longshot_filter(df: pd.DataFrame, enforce: bool) -> pd.DataFrame:
     return df[~is_longshot_skill_position].reset_index(drop=True)
 
 
+def _clear_player_search() -> None:
+    st.session_state.player_search_input = ""
+
+
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
@@ -114,7 +119,18 @@ selected_leagues = st.sidebar.multiselect("League", options=leagues, default=lea
 selected_positions = st.sidebar.multiselect("Position", options=positions, default=positions)
 selected_props = st.sidebar.multiselect("Prop Type", options=prop_types, default=prop_types)
 selected_books = st.sidebar.multiselect("Sportsbook", options=sportsbooks, default=sportsbooks)
-player_search = st.sidebar.text_input("Search player name")
+
+st.sidebar.subheader("🔎 Player search")
+search_col, clear_col = st.sidebar.columns([3, 1])
+with search_col:
+    player_search = st.text_input(
+        "Search player name",
+        key="player_search_input",
+        placeholder="e.g. Saquon",
+        label_visibility="collapsed",
+    )
+with clear_col:
+    st.button("✖ Clear", on_click=_clear_player_search, width="stretch")
 
 st.sidebar.header("📊 Sorting")
 sort_label_map = {
@@ -146,7 +162,9 @@ correlation_multiplier = st.sidebar.slider(
 # capped_df keeps the WR/RB +125 rule (a data-integrity rule) but NOT the
 # view-only sidebar filters below -- it's the search space for "which
 # sportsbook has every selected leg", so an unrelated league/position/book
-# filter toggle doesn't hide a book that actually has your full parlay.
+# filter toggle doesn't hide a book that actually has your full parlay. Its
+# row index also doubles as the stable id used to track parlay selections
+# below, independent of whatever filter/sort/search view is on screen.
 capped_df = apply_longshot_filter(df, enforce_cap)
 working_df = capped_df[
     capped_df["League"].isin(selected_leagues)
@@ -161,9 +179,19 @@ if player_search.strip():
 
 working_df = working_df.sort_values(by=sort_label_map[sort_label], ascending=sort_ascending)
 
-if "Select" not in working_df.columns:
-    working_df = working_df.copy()
-    working_df.insert(0, "Select", False)
+# ---------------------------------------------------------------------------
+# Parlay selection state
+# ---------------------------------------------------------------------------
+# Selected legs are tracked by row id (independent of whatever filter/sort/
+# search view is currently on screen), so a leg stays on the ticket -- and
+# can be removed from the ticket directly, with no need to scroll back up
+# and find its checkbox -- even after you filter it out of view.
+if "parlay_leg_ids" not in st.session_state:
+    st.session_state.parlay_leg_ids = set()
+
+# Drop any stale ids that no longer exist in the current data (e.g. right
+# after a manual data refresh reshuffles the underlying rows).
+st.session_state.parlay_leg_ids &= set(capped_df.index)
 
 # ---------------------------------------------------------------------------
 # Main grid
@@ -171,8 +199,9 @@ if "Select" not in working_df.columns:
 st.subheader(f"📋 Filtered Slate ({len(working_df)} plays)")
 st.write("Check the boxes on the left to add plays to your parlay ticket below.")
 
-display_cols = [c for c in DISPLAY_COLUMNS if c in working_df.columns]
-grid_df = working_df[display_cols]
+non_select_cols = [c for c in DISPLAY_COLUMNS if c != "Select" and c in working_df.columns]
+grid_df = working_df[non_select_cols].copy()
+grid_df.insert(0, "Select", grid_df.index.isin(st.session_state.parlay_leg_ids))
 
 edited_df = st.data_editor(
     grid_df,
@@ -194,28 +223,51 @@ edited_df = st.data_editor(
     key="props_grid",
 )
 
+# Reconcile checkbox edits made in the currently-visible rows back into the
+# persistent selection set. Rows not currently on screen (hidden by a
+# filter/search) are left untouched, so they stay on the parlay ticket.
+visible_ids = edited_df.index
+edited_selected = set(visible_ids[edited_df["Select"] == True])  # noqa: E712
+edited_unselected = set(visible_ids) - edited_selected
+st.session_state.parlay_leg_ids |= edited_selected
+st.session_state.parlay_leg_ids -= edited_unselected
+
 # ---------------------------------------------------------------------------
 # Parlay builder
 # ---------------------------------------------------------------------------
 st.divider()
 st.subheader("🎰 Live Parlay Ticket")
 
-selected_rows = edited_df[edited_df["Select"] == True].copy()  # noqa: E712
+full_selected = capped_df.loc[capped_df.index.isin(st.session_state.parlay_leg_ids)]
+if "GameTime" in full_selected.columns and not full_selected.empty:
+    full_selected = full_selected.sort_values("GameTime")
 
-if selected_rows.empty:
+if full_selected.empty:
     st.info("Select one or more plays above to build and price a parlay.")
 else:
-    # Bring back the columns needed for pricing that may not be in the
-    # display grid (Opponent is used for same-game grouping).
-    full_selected = working_df.loc[selected_rows.index]
+    st.caption(f"{len(full_selected)} leg(s) selected -- click 🗑️ to remove one without scrolling back up.")
 
-    st.write(
-        full_selected[
-            [c for c in ["GameTime", "Player", "Game", "PropType",
-                         "CoversLine", "SportsbookOdds", "ModelFairOdds", "EdgePct"]
-            if c in full_selected.columns]
-        ]
-    )
+    leg_col_widths = [2.4, 1.8, 2.0, 1.1, 1.3, 1.6, 0.7]
+    header_cells = st.columns(leg_col_widths)
+    for label, cell in zip(["Player", "Game", "Prop Type", "Line", "Odds", "Sportsbook", ""], header_cells):
+        cell.markdown(f"**{label}**")
+
+    for leg_id, leg in full_selected.iterrows():
+        row_cells = st.columns(leg_col_widths)
+        row_cells[0].write(leg.get("Player", ""))
+        row_cells[1].write(leg.get("Game", ""))
+        row_cells[2].write(leg.get("PropType", ""))
+        row_cells[3].write(leg.get("CoversLine", ""))
+        odds_val = leg.get("SportsbookOdds")
+        row_cells[4].write(format_american(int(odds_val)) if pd.notna(odds_val) else "")
+        row_cells[5].write(leg.get("Sportsbook", ""))
+        if row_cells[6].button("🗑️", key=f"remove_leg_{leg_id}", help="Remove this leg from the parlay"):
+            st.session_state.parlay_leg_ids.discard(leg_id)
+            if "props_grid" in st.session_state:
+                del st.session_state["props_grid"]
+            st.rerun()
+
+    st.divider()
 
     sportsbook_pricing = price_parlay(full_selected, odds_col="SportsbookOdds", correlation_multiplier=1.0)
     model_pricing = price_parlay(full_selected, odds_col="ModelFairOdds", correlation_multiplier=correlation_multiplier)
