@@ -367,6 +367,10 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
             except (ValueError, OverflowError, TypeError):
                 game_time_iso = None
 
+        # Covers' own "ATL vs CHW" phrasing lists the away team first, so we
+        # carry that straight through as "Away @ Home".
+        game = f"{team} @ {opponent}" if team and opponent else ""
+
         for book in book_rows:
             rows.append(
                 {
@@ -375,7 +379,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                     "Player": player_name,
                     "Team": team,
                     "Opponent": opponent,
-                    "Matchup": f"vs {opponent}" if opponent else "",
+                    "Game": game,
                     "GameTime": game_time_iso.isoformat() if game_time_iso else game_time_raw,
                     "PropType": f"{prop_type} ({book['side']})" if prop_type else book["side"],
                     "CoversLine": book["line"] if book["line"] is not None else fallback_line,
@@ -413,7 +417,7 @@ def _normalize_row(raw: dict, league: str) -> dict | None:
         "Player": player,
         "Team": team,
         "Opponent": opponent,
-        "Matchup": f"vs {opponent}" if opponent else "",
+        "Game": f"{team} @ {opponent}" if team and opponent else "",
         "GameTime": _first_present(raw, JSON_KEY_ALIASES["game_time"]) or "",
         "PropType": _first_present(raw, JSON_KEY_ALIASES["prop_type"]) or "",
         "CoversLine": _first_present(raw, JSON_KEY_ALIASES["line"]),
