@@ -118,3 +118,79 @@ def price_parlay(
         "combined_american": prob_to_american(total_prob),
         "groups": groups,
     }
+
+
+def best_book_parlay(
+    all_props: pd.DataFrame,
+    selected: pd.DataFrame,
+    odds_col: str = "SportsbookOdds",
+) -> dict:
+    """
+    Find which single sportsbook -- if any -- carries every one of the
+    selected legs, and among those, which offers the best combined payout.
+
+    Each selected leg is matched back to `all_props` (the full slate, not
+    just what's currently checked) by (Player, PropType, CoversLine) --
+    i.e. "the exact same bet" -- to see what every sportsbook prices that
+    leg at. A book only qualifies if it has a price for ALL selected legs;
+    among qualifying books, the one with the lowest combined implied
+    probability (highest payout) is "best". No same-game correlation
+    adjustment is applied here -- this reflects an actual bookmaker payout,
+    not a model estimate of true win probability.
+
+    Returns {"has_complete_book": bool, "best": {...} | None,
+    "all_books": [...]} -- all_books is sorted best-to-worst payout among
+    only the books that could cover every leg.
+    """
+    if selected is None or selected.empty or all_props is None or all_props.empty:
+        return {"has_complete_book": False, "best": None, "all_books": []}
+
+    required_cols = {"Player", "PropType", "CoversLine", "Sportsbook", odds_col}
+    if not required_cols.issubset(all_props.columns):
+        return {"has_complete_book": False, "best": None, "all_books": []}
+
+    leg_keys = list(
+        selected[["Player", "PropType", "CoversLine"]].itertuples(index=False, name=None)
+    )
+
+    results = []
+    for book in sorted(all_props["Sportsbook"].dropna().unique().tolist()):
+        book_df = all_props[all_props["Sportsbook"] == book]
+
+        odds_for_legs = []
+        complete = True
+        for player, prop_type, line in leg_keys:
+            match = book_df[
+                (book_df["Player"] == player)
+                & (book_df["PropType"] == prop_type)
+                & (book_df["CoversLine"] == line)
+            ]
+            if match.empty:
+                complete = False
+                break
+            odds_for_legs.append(match.iloc[0][odds_col])
+
+        if not complete:
+            continue
+
+        prob = 1.0
+        for o in odds_for_legs:
+            prob *= american_to_prob(o)
+        prob = min(max(prob, 1e-6), 0.999999)
+
+        results.append(
+            {
+                "sportsbook": book,
+                "combined_probability": prob,
+                "combined_american": prob_to_american(prob),
+            }
+        )
+
+    results.sort(key=lambda r: r["combined_probability"])  # lowest prob = biggest payout = best
+
+    return {
+        "has_complete_book": len(results) > 0,
+        "best": results[0] if results else None,
+        "all_books": results,
+    }
+
