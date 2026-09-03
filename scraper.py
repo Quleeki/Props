@@ -5,38 +5,50 @@ Live player-prop scraper for:
     NFL  -> https://www.covers.com/sport/football/nfl/player-props
     NCAAF/CFB -> https://www.covers.com/sport/football/ncaaf/player-props
 
-Covers.com renders its prop cards server-side (no hidden API call needed)
-using a card-based layout, NOT html <table> tags and NOT a Next.js
-__NEXT_DATA__ blob. Each prop card looks roughly like:
+Covers.com renders its prop cards server-side (no hidden API call needed).
+Each prop is a `<section class="picks-card ...">` shaped like this
+(confirmed against real, live NFL markup -- Sept 2026 Week 1 props):
 
-    <div class="category-title ...">
-        <a class="player-link" href="/sport/.../players/194249/miguel-vargas">M. Vargas</a>
-        <span class="player-position"> (3B)</span>
-        <span class="prediction ...">0.5 Total RBIs</span>
-    </div>
-    ...
-    <div class="best-odd-container ...">
-        <a class="deeplink" data-tracking='{"text":"ATL vs CHW, Thu, Aug 20 • 2:10 PM ET",
-                                             "elementText":"o0.5 +171 draftkings"}' ...>
-            <b>o0.5</b> +171
-        </a>
-        <button data-bs-target="#120636756-proj-odds" ...>...</button>
-    </div>
-    <div id="120636756-proj-odds" class="tab-pane ... compare-odds-table">
-        <div class="compare-odds-column">
-            <img class="sportsbook-logo" alt="BetMGM logo" ...>
-            <a class="book-odds" data-tracking='{"elementText":"o0.5 +160 + betmgm", ...}'>...</a>
+    <section class="picks-card ..." data-id="136889837" ...>
+        <div class="d-flex justify-content-between ...">
+            <span class="_badge ...">RECEIVING YARDS</span>
+            <a class="projection-game-link ...">NO @ DET</a>
         </div>
-        ... (one .compare-odds-column per additional sportsbook)
-    </div>
+        <div class="... category-title ...">
+            <a class="player-link" href="/sport/.../players/53229/chris-olave">C. Olave</a>
+            <span class="player-position"> (WR)</span>
+            <span class="prediction ...">u78.5 Receiving Yards</span>
+        </div>
+        ...
+        <div class="best-odd-container ...">
+            <a class="deeplink" href="/go/b?...">
+                <span><b>u78.5</b>&nbsp;-110</span>
+                <span><img alt="bet365" ...></span>
+            </a>
+            <button data-bs-target="#136889837-proj-odds"
+                    data-tracking='{"text":"NO vs DET, Sun, Sep 13 . 1:00 PM ET", ...}'>...</button>
+        </div>
+        <div id="136889837-proj-odds" class="tab-pane ... compare-odds-table">
+            <div class="compare-odds-content">
+                <div class="compare-odds-column">
+                    <img class="sportsbook-logo" alt="BetMGM logo" ...>
+                    <a class="book-odds"><b>u78.5</b>&nbsp;-110</a>   (or just "-" if that
+                </div>                                                book has no price)
+                ... (one .compare-odds-column per sportsbook Covers tracks)
+            </div>
+        </div>
+    </section>
 
-_parse_prop_cards() below targets exactly this structure -- confirmed
-against a real saved copy of the MLB player-props page (NFL/NCAAF render
-the same way, they just have no props posted yet for the upcoming slate).
-The matchup + kickoff time and the over/under + line + odds + sportsbook
-for every book comparison are all recovered from the `data-tracking`
-JSON attribute on each odds link, which is far more reliable than trying
-to parse the visible text/CSS layout directly.
+IMPORTANT, and the reason this scraper went dark for a while: an earlier
+version of this file was built against Covers' *MLB* player-props page,
+where each odds link carried a `data-tracking` JSON attribute with the
+side/line/odds/sportsbook baked in as a JSON string. Covers' *current* NFL
+markup does NOT put that on the odds links at all -- the price is plain
+visible text (`<b>u78.5</b>&nbsp;-110`) and the sportsbook name comes from
+an `<img alt="...">` instead. `_parse_prop_cards()` below targets this
+current, confirmed structure directly (no JSON parsing of odds needed).
+The one JSON blob that *does* still exist -- on the odds-comparison
+"expand" button -- is only used to recover the game's kickoff date/time.
 
 A couple of older, more speculative parsing strategies (_parse_next_data /
 _parse_html_tables) are kept as fallbacks in case Covers changes their
@@ -221,14 +233,14 @@ def _parse_html_tables(html: str) -> list[dict]:
     return rows
 
 
-# Matches data-tracking "elementText" values like "o0.5 +171 draftkings"
-# (best-odds block) or "o0.5 +160 + betmgm" (compare-odds block, which adds
-# a stray "+" separator before the sportsbook slug -- the optional \+?\s*
-# absorbs that): (o|u) side, line, American odds, sportsbook slug.
-_ELEMENT_TEXT_RE = re.compile(r"^([ou])\s*([\d.]+)\s*([+\-]\d+)\s+\+?\s*(.+)$", re.IGNORECASE)
+# Matches Covers' current plain-text odds format, e.g. "u78.5 -110" or
+# "o0.5 +145" -> (o|u) side, line, American odds. No JSON involved -- this
+# is just the visible text inside the odds link/span.
+_SIDE_LINE_ODDS_RE = re.compile(r"^([ou])\s*([\d.]+)\D*?([+\-]\d+)$", re.IGNORECASE)
 
-# Matches data-tracking "text" values like
-# "ATL vs CHW, Thu, Aug 20 • 2:10 PM ET" -> team, opponent, date/time.
+# Matches the odds-comparison "expand" button's data-tracking "text" field,
+# e.g. "NO vs DET, Sun, Sep 13 . 1:00 PM ET" -> team, opponent, date/time.
+# (This is the one JSON blob that's still present in the current markup.)
 _MATCHUP_TEXT_RE = re.compile(r"^(\S+)\s+vs\s+(\S+),\s*(.+)$")
 
 # Friendlier display names for known sportsbook slugs; anything not listed
@@ -242,8 +254,10 @@ _SPORTSBOOK_NAME_MAP = {
     "betrivers": "BetRivers",
     "espnbet": "ESPN BET",
     "fanatics": "Fanatics",
+    "fanaticssportsbook": "Fanatics",
     "wynnbet": "WynnBET",
     "pointsbet": "PointsBet",
+    "hardrockbet": "Hard Rock Bet",
     "thescore": "theScore Bet",
     "thescorebet": "theScore Bet",
 }
@@ -254,14 +268,42 @@ def _format_sportsbook_name(slug: str) -> str:
     return _SPORTSBOOK_NAME_MAP.get(key, slug.strip().title())
 
 
+def _clean_book_alt(alt: str) -> str:
+    """Strip the trailing ' logo' suffix Covers appends to some (but not
+    all) sportsbook <img alt> text, e.g. 'BetMGM logo' -> 'BetMGM'."""
+    return re.sub(r"\s*logo\s*$", "", alt or "", flags=re.IGNORECASE).strip()
+
+
+def _parse_side_line_odds(text: str) -> tuple[str, float, int] | None:
+    """Parse the visible odds text on a link/span, e.g. 'u78.5 -110' ->
+    ('Under', 78.5, -110). Returns None for anything that doesn't match --
+    including a book with no price posted, which Covers shows as a bare
+    '-' with no over/under letter or line number in front of it."""
+    cleaned = text.replace("\xa0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    m = _SIDE_LINE_ODDS_RE.match(cleaned)
+    if not m:
+        return None
+    side, line_str, odds_str = m.groups()
+    try:
+        return ("Over" if side.lower() == "o" else "Under", float(line_str), int(odds_str))
+    except ValueError:
+        return None
+
+
 def _parse_prop_cards(html: str, league: str) -> list[dict]:
     """Primary parser: extract prop rows from Covers' server-rendered
-    div-based prop cards (see module docstring for the confirmed markup
-    shape). Returns one row per (player, prop, sportsbook) combination."""
+    <section class="picks-card"> prop cards (see module docstring for the
+    confirmed markup shape). Returns one row per (player, prop, sportsbook)
+    combination -- one from the "best odds" block plus up to several more
+    from the odds-comparison panel, deduped when they're the same book."""
     soup = BeautifulSoup(html, "lxml")
     rows: list[dict] = []
 
-    for category_title in soup.find_all("div", class_="category-title"):
+    for card in soup.find_all("section", class_="picks-card"):
+        category_title = card.find("div", class_="category-title")
+        if not category_title:
+            continue
         player_link = category_title.find("a", class_="player-link")
         if not player_link:
             continue
@@ -270,106 +312,88 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         position_tag = category_title.find("span", class_="player-position")
         position = position_tag.get_text(strip=True).strip("() ") if position_tag else ""
 
-        prediction_tag = category_title.find("span", class_="prediction")
-        prediction_text = prediction_tag.get_text(strip=True) if prediction_tag else ""
-        line_match = re.match(r"^([\d.]+)\s+(.*)$", prediction_text)
-        if line_match:
-            fallback_line = float(line_match.group(1))
-            prop_type = line_match.group(2).strip()
+        # Prop type: prefer the clean "RECEIVING YARDS" style badge; fall
+        # back to parsing it out of the "u78.5 Receiving Yards" prediction
+        # text if the badge isn't there for some reason.
+        badge_tag = card.find("span", class_="_badge")
+        if badge_tag and badge_tag.get_text(strip=True):
+            prop_type = badge_tag.get_text(strip=True).title()
         else:
-            fallback_line = None
-            prop_type = prediction_text
+            prediction_tag = category_title.find("span", class_="prediction")
+            prediction_text = prediction_tag.get_text(strip=True) if prediction_tag else ""
+            m = re.match(r"^[ou]?[\d.]+\s+(.*)$", prediction_text, re.IGNORECASE)
+            prop_type = m.group(1).strip() if m else prediction_text
 
-        # Walk up from the category-title looking for the ancestor "card"
-        # div that also contains a .best-odd-container -- that's our
-        # anchor for finding this specific player's odds links.
-        card = None
-        node = category_title.find_parent("div")
-        for _ in range(5):
-            if node is None:
-                break
-            if node.find("div", class_="best-odd-container"):
-                card = node
-                break
-            node = node.find_parent("div")
+        # Game: Covers already gives us this pre-formatted as "Away @ Home"
+        # (e.g. "NO @ DET") -- no parsing needed.
+        game_link = card.find("a", class_="projection-game-link")
+        game = game_link.get_text(strip=True) if game_link else ""
+        team, _, opponent = game.partition(" @ ")
+        team, opponent = team.strip(), opponent.strip()
 
-        odds_links = []
-        if card is not None:
-            best_odds = card.find("div", class_="best-odd-container")
-            if best_odds:
-                odds_links.extend(best_odds.find_all("a", attrs={"data-tracking": True}))
+        # Kickoff time: the one place a data-tracking JSON blob still
+        # exists is on the odds-comparison "expand" button.
+        game_time_raw = ""
+        game_time_iso = None
+        expand_btn = card.find("button", attrs={"data-bs-target": True})
+        if expand_btn:
+            try:
+                tracking = json.loads(expand_btn.get("data-tracking", ""))
+                matchup_text = tracking.get("text", "")
+            except (json.JSONDecodeError, TypeError):
+                matchup_text = ""
+            mm = _MATCHUP_TEXT_RE.match(matchup_text) if matchup_text else None
+            if mm:
+                _, _, game_time_raw = mm.groups()
+                try:
+                    game_time_iso = dateutil_parser.parse(game_time_raw, fuzzy=True)
+                except (ValueError, OverflowError, TypeError):
+                    game_time_iso = None
 
-            # The full odds-comparison table lives OUTSIDE the card as a
-            # sibling, linked only by a shared id (e.g. "#120636756-proj-
-            # odds") referenced from an expand button's data-bs-target --
-            # so look it up globally by id rather than assuming nesting.
-            expand_btn = card.find("button", attrs={"data-bs-target": True})
-            if expand_btn:
-                target = expand_btn.get("data-bs-target", "")
-                if target.startswith("#"):
-                    compare_div = soup.find(id=target[1:])
-                    if compare_div:
-                        odds_links.extend(
-                            compare_div.find_all("a", attrs={"data-tracking": True})
-                        )
-
-        matchup_text = ""
         book_rows = []
         seen = set()
-        for link in odds_links:
-            tracking_raw = link.get("data-tracking", "")
-            try:
-                tracking = json.loads(tracking_raw)
-            except (json.JSONDecodeError, TypeError):
-                continue
 
-            element_text = tracking.get("elementText", "")
-            m = _ELEMENT_TEXT_RE.match(element_text)
-            if not m:
-                continue
-            side, line_str, odds_str, book_slug = m.groups()
-            try:
-                odds_val = int(odds_str)
-            except ValueError:
-                continue
-
-            book_key = re.sub(r"[^a-z0-9]", "", book_slug.strip().lower())
+        def _maybe_add_book(book_name_raw: str, odds_text: str) -> None:
+            book_name = _format_sportsbook_name(_clean_book_alt(book_name_raw))
+            if not book_name:
+                return
+            parsed = _parse_side_line_odds(odds_text)
+            if not parsed:
+                return  # no price posted at this book for this prop
+            side, line_val, odds_val = parsed
+            book_key = re.sub(r"[^a-z0-9]", "", book_name.lower())
             if book_key not in PREFERRED_SPORTSBOOKS:
-                continue  # not one of your preferred books -- skip it
-
-            if not matchup_text and tracking.get("text"):
-                matchup_text = tracking["text"]
-
-            dedupe_key = (book_slug.strip().lower(), side.lower(), odds_val)
+                return  # not one of your preferred books -- skip it
+            dedupe_key = (book_key, side, line_val, odds_val)
             if dedupe_key in seen:
-                continue
+                return  # e.g. the "best odds" book also appears in compare-odds
             seen.add(dedupe_key)
+            book_rows.append({"side": side, "line": line_val, "odds": odds_val, "sportsbook": book_name})
 
-            book_rows.append(
-                {
-                    "side": "Over" if side.lower() == "o" else "Under",
-                    "line": float(line_str),
-                    "odds": odds_val,
-                    "sportsbook": _format_sportsbook_name(book_slug),
-                }
-            )
+        # -- Best-odds block: a single highlighted book + price.
+        best_odds_div = card.find("div", class_="best-odd-container")
+        if best_odds_div:
+            best_link = best_odds_div.find("a", class_="deeplink")
+            if best_link:
+                img = best_link.find("img")
+                _maybe_add_book(img.get("alt", "") if img else "", best_link.get_text(" ", strip=True))
+
+        # -- Odds-comparison panel: one column per sportsbook Covers
+        # tracks. Lives inside the same card, addressable by the id the
+        # expand button's data-bs-target points at.
+        if expand_btn:
+            target = expand_btn.get("data-bs-target", "")
+            compare_div = soup.find(id=target[1:]) if target.startswith("#") else None
+            if compare_div:
+                for column in compare_div.find_all("div", class_="compare-odds-column"):
+                    img = column.find("img")
+                    link = column.find("a", class_="book-odds")
+                    if not link:
+                        continue
+                    _maybe_add_book(img.get("alt", "") if img else "", link.get_text(" ", strip=True))
 
         if not book_rows:
             continue  # couldn't recover any priced odds for this card
-
-        team = opponent = game_time_raw = ""
-        game_time_iso = None
-        mm = _MATCHUP_TEXT_RE.match(matchup_text) if matchup_text else None
-        if mm:
-            team, opponent, game_time_raw = mm.groups()
-            try:
-                game_time_iso = dateutil_parser.parse(game_time_raw, fuzzy=True)
-            except (ValueError, OverflowError, TypeError):
-                game_time_iso = None
-
-        # Covers' own "ATL vs CHW" phrasing lists the away team first, so we
-        # carry that straight through as "Away @ Home".
-        game = f"{team} @ {opponent}" if team and opponent else ""
 
         for book in book_rows:
             rows.append(
@@ -382,7 +406,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                     "Game": game,
                     "GameTime": game_time_iso.isoformat() if game_time_iso else game_time_raw,
                     "PropType": f"{prop_type} ({book['side']})" if prop_type else book["side"],
-                    "CoversLine": book["line"] if book["line"] is not None else fallback_line,
+                    "CoversLine": book["line"],
                     "SportsbookOdds": book["odds"],
                     "Sportsbook": book["sportsbook"],
                     "ModelFairOdds": book["odds"],
