@@ -71,21 +71,48 @@ shows a banner saying so. Nothing about the dashboard's filtering/sorting/
 parlay logic changes based on which data source is active; they share the
 exact same schema.
 
-### Optional: JS rendering via ScrapingBee
+### Required for real DraftKings/BetMGM/Bet365/theScore Bet odds: ScrapingBee geo-proxy
 
-If Covers blocks plain requests or the props are loaded client-side after
-page load, set an environment variable and the scraper will route requests
-through ScrapingBee (JS rendering + rotating proxies) instead of a bare
-`requests.get()`:
+Covers.com decides which sportsbooks to render server-side based on the
+*visitor's* US location, since DraftKings/BetMGM/Bet365 are licensed
+state-by-state. A cloud server (like Streamlit Community Cloud) fetches
+from a data-center IP with no real US state attached to it, so Covers
+falls back to showing only nationwide-legal prediction markets instead
+(Kalshi, Polymarket, Novig, ProphetX, Underdog) — confirmed by comparing
+the scraper's logged output against a real browser's view of the same
+page. This isn't a parsing bug; it's what Covers actually sends.
+
+To get real sportsbook odds, route the request through a proxy with a US
+residential IP via [ScrapingBee](https://www.scrapingbee.com/):
 
 ```bash
 export SCRAPINGBEE_API_KEY="your-key-here"
 ```
 
-No code changes needed — `scraper.py` picks this up automatically. (This
-was the cheaper alternative to Apify discussed when scoping the project;
-ScrapingBee's free/freelancer tier should comfortably cover checking two
-pages periodically.)
+On Streamlit Community Cloud, add it under the app's **Settings → Secrets**
+instead of setting a local environment variable. No code changes needed —
+`scraper.py` picks it up automatically and requests a premium/residential
+proxy geo-targeted to the US (`country_code=us`). This should land the
+request in *some* US state — most states with legal online sports betting
+carry all four of your preferred books, so it'll very likely work, but
+there's no guarantee of landing in one specific state without paying for a
+pricier state-level-targeting proxy provider. If it lands in a state
+without one of your books, that book will simply be absent from that
+scrape, same as if a real visitor there saw the same thing.
+
+Two more env vars tune this if needed:
+
+- `SCRAPINGBEE_COUNTRY_CODE` (default `us`) — the proxy's country.
+- `SCRAPINGBEE_RENDER_JS` (default `false`) — Covers' props pages are
+  confirmed server-rendered (no JS needed to see the props), so this stays
+  off to save ScrapingBee credits; flip it to `true` only if a future
+  Covers markup change ever requires JS execution to see the content.
+
+ScrapingBee's free trial (no credit card) includes a limited number of
+credits to test this with; premium/residential proxy requests cost more
+credits per call than a plain fetch, so keep an eye on usage if you move to
+a paid plan — this was the cheaper alternative to Apify discussed when
+scoping the project, but geo-targeted residential proxying isn't free.
 
 ## The +125 WR/RB longshot filter
 
