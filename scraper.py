@@ -1,13 +1,25 @@
 """
 scraper.py
 
-Live player-prop scraper for:
+Live player-prop scraper for NFL and NCAAF/CFB.
+
+The main league pages --
     NFL  -> https://www.covers.com/sport/football/nfl/player-props
     NCAAF/CFB -> https://www.covers.com/sport/football/ncaaf/player-props
+-- are fetched once per league, but ONLY to harvest this week's game-id
+list and detected country/region out of a `<div id="market-filters">`
+element on that page (see _extract_market_filters and the
+CATEGORY_MARKET_KEYS comment block below). Those main pages only ever
+render a curated ~50-pick "All Markets" feed, not the full market, so the
+actual prop data for the 4 markets this dashboard cares about (Anytime TD,
+Receiving Yards, Receptions, Passing TDs) comes from one additional
+request per category, per league, to Covers' filtered-league-projections
+endpoint -- see fetch_covers_props() for the full fetch flow.
 
-Covers.com renders its prop cards server-side (no hidden API call needed).
-Each prop is a `<section class="picks-card ...">` shaped like this
-(confirmed against real, live NFL markup -- Sept 2026 Week 1 props):
+Covers.com renders its prop cards server-side (no hidden API call needed)
+on both the main pages and the per-category endpoint responses. Each prop
+is a `<section class="picks-card ...">` shaped like this (confirmed
+against real, live NFL and NCAAF markup -- Sept 2026 Week 2):
 
     <section class="picks-card ..." data-id="136889837" ...>
         <div class="d-flex justify-content-between ...">
@@ -116,6 +128,67 @@ PREFERRED_SPORTSBOOKS = {"draftkings", "betmgm", "bet365", "thescore", "thescore
 # PREFERRED_SPORTSBOOKS priced that specific prop, and are tagged
 # DataSource="COVERS_PREDICTION_MARKET".
 PREDICTION_MARKETS = {"novig", "kalshi", "kalshisports", "polymarket", "prophetx", "underdog"}
+
+# ---------------------------------------------------------------------------
+# Per-category "filtered projections" pages
+# ---------------------------------------------------------------------------
+# COVERS_URLS above only shows a curated ~50-pick "All Markets" feed per
+# league, NOT the full market -- confirmed by drilling into individual
+# category filters on the live site and finding 40-50+ players in a SINGLE
+# category alone (e.g. CFB Passing Yards had 40 players by itself). Those
+# category filters don't change the browser's URL bar -- they're a client-
+# side fetch to a separate, discoverable endpoint:
+#
+#   https://www.covers.com/picks/filtered-league-projections/mlb/
+#       <comma-separated game ids>/<market key>?country=<cc>&region=<r>
+#
+# ("mlb" in the path is a fixed literal segment Covers uses for this
+# endpoint regardless of sport -- confirmed against real captured NFL and
+# NCAAF requests, not a mistake to "fix".) The comma-separated game ids are
+# just this week's slate for the league (the SAME list is reused across
+# every category -- confirmed by comparing two different NCAAF categories
+# side by side), and conveniently the main league page we already fetch
+# embeds that exact list, plus the country/region Covers detected for the
+# request, in one element:
+#
+#   <div id="market-filters" data-games="123,456,..." data-country="us"
+#        data-region="in" class="covers-MarketButtons">
+#
+# So for each league, fetch_covers_props() fetches the main page once just
+# to harvest that div (see _extract_market_filters), then makes one more
+# request per category below to the filtered-projections endpoint, each of
+# which returns the FULL, uncapped list of <section class="picks-card">
+# rows for that single market -- the exact same markup _parse_prop_cards()
+# already knows how to read (confirmed against a real captured row).
+#
+# NOTE: this means ~5 HTTP requests per league per refresh (1 for
+# market-filters + 1 per category here) instead of 1 -- worth keeping an
+# eye on ScrapingBee credit usage (see SCRAPINGBEE_* below) if you're on a
+# metered plan or trial.
+CATEGORY_MARKET_KEYS: dict[str, dict[str, str]] = {
+    "NFL": {
+        "Anytime TD": "nfl_game_player_score_touchdown",
+        "Receiving Yards": "nfl_game_player_receiving_yards",
+        "Receptions": "nfl_game_player_receiving_receptions",
+        "Passing TDs": "nfl_game_player_passing_touchdowns",
+    },
+    "CFB": {
+        # Unconfirmed -- no live CFB Anytime TD props existed yet to check
+        # this key against a real request. If CFB TD-scorer props don't
+        # show up once they're posted, this is the first thing to recheck.
+        "Anytime TD": "ncaaf_game_player_score_touchdown",
+        "Receiving Yards": "ncaaf_game_player_receiving_yards",
+        # "recptions" (missing an 'e') is Covers' own market key, captured
+        # verbatim from a real request -- not a typo introduced here.
+        "Receptions": "ncaaf_game_player_recptions",
+        "Passing TDs": "ncaaf_game_player_touchdown_passes",
+    },
+}
+
+CATEGORY_PROJECTIONS_URL = (
+    "https://www.covers.com/picks/filtered-league-projections/mlb/"
+    "{games}/{market_key}?country={country}&region={region}"
+)
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -420,12 +493,19 @@ def _parse_prediction_market_odds(text: str) -> tuple[str, float, int] | None:
     return None
 
 
-def _parse_prop_cards(html: str, league: str) -> list[dict]:
+def _parse_prop_cards(html: str, league: str, log_label: str | None = None) -> list[dict]:
     """Primary parser: extract prop rows from Covers' server-rendered
     <section class="picks-card"> prop cards (see module docstring for the
     confirmed markup shape). Returns one row per (player, prop, sportsbook)
     combination -- one from the "best odds" block plus up to several more
-    from the odds-comparison panel, deduped when they're the same book."""
+    from the odds-comparison panel, deduped when they're the same book.
+
+    `league` is used for the emitted rows' "League" field (must be "NFL" or
+    "CFB"). `log_label` is used only for the diagnostic print statements
+    below -- pass something more specific (e.g. "NFL/Receiving Yards") when
+    this is called once per category, so the funnel/sample-text lines in
+    the log are distinguishable instead of all saying just "NFL"."""
+    log_label = log_label or league
     soup = BeautifulSoup(html, "lxml")
     rows: list[dict] = []
 
@@ -434,6 +514,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
     # of just knowing the final row count.
     stats = {
         "total_cards": 0,
+        "duplicate_cards_skipped": 0,
         "no_category_title": 0,
         "no_player_link": 0,
         "no_book_rows": 0,
@@ -449,6 +530,26 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
 
     all_cards = soup.find_all("section", class_="picks-card")
     stats["total_cards"] = len(all_cards)
+
+    # Covers' page has been observed rendering the SAME prop as two separate
+    # <section class="picks-card" data-id="..."> elements (most likely a
+    # responsive-layout duplicate -- e.g. one markup block per breakpoint,
+    # both included in the server-rendered HTML). Each card carries a
+    # data-id, so drop repeats of an id we've already processed -- otherwise
+    # every book's odds for that prop get emitted twice, roughly doubling
+    # raw row counts, before downstream grouping (best_line_per_prop in
+    # app.py) incidentally collapses the duplicates back out again.
+    seen_card_ids: set[str] = set()
+    deduped_cards = []
+    for card in all_cards:
+        card_id = card.get("data-id")
+        if card_id and card_id in seen_card_ids:
+            stats["duplicate_cards_skipped"] += 1
+            continue
+        if card_id:
+            seen_card_ids.add(card_id)
+        deduped_cards.append(card)
+    all_cards = deduped_cards
 
     for card in all_cards:
         category_title = card.find("div", class_="category-title")
@@ -599,7 +700,8 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
             )
 
     print(
-        f"[scraper] {league}: card funnel -- found {stats['total_cards']} <section class=picks-card>, "
+        f"[scraper] {log_label}: card funnel -- found {stats['total_cards']} <section class=picks-card>, "
+        f"{stats['duplicate_cards_skipped']} were duplicate data-id repeats (skipped), "
         f"{stats['no_category_title']} missing category-title, {stats['no_player_link']} missing player-link, "
         f"{stats['no_book_rows']} had no usable odds from any tracked source, "
         f"{stats['cards_used_prediction_market_fallback']} fell back to prediction-market pricing "
@@ -607,7 +709,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         file=sys.stderr,
     )
     print(
-        f"[scraper] {league}: odds-extraction detail -- "
+        f"[scraper] {log_label}: odds-extraction detail -- "
         f"no_best_odds_div={stats['no_best_odds_div']}, no_best_link={stats['no_best_link']}, "
         f"best_text_parse_fail={stats['best_text_parse_fail']}, no_compare_div={stats['no_compare_div']}, "
         f"compare_columns_seen={stats['compare_columns_seen']}, "
@@ -615,7 +717,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         file=sys.stderr,
     )
     for s in sample_texts:
-        print(f"[scraper] {league}: sample odds text seen -- {s}", file=sys.stderr)
+        print(f"[scraper] {log_label}: sample odds text seen -- {s}", file=sys.stderr)
 
     return rows
 
@@ -655,9 +757,61 @@ def _normalize_row(raw: dict, league: str) -> dict | None:
     }
 
 
+def _extract_market_filters(html: str) -> dict[str, str] | None:
+    """Pull this week's game-id list, plus the country/region Covers
+    detected for this request, out of the main league page's
+    <div id="market-filters" data-games="..." data-country="..."
+    data-region="..."> element (see the CATEGORY_MARKET_KEYS comment block
+    above) -- so the per-category requests can be built without a separate
+    lookup step. Returns None if that element/attribute isn't there (e.g.
+    Covers changed this markup, or there's genuinely no slate this week)."""
+    soup = BeautifulSoup(html, "lxml")
+    filters_div = soup.find(id="market-filters")
+    if not filters_div:
+        return None
+    games = filters_div.get("data-games", "").strip()
+    if not games:
+        return None
+    return {
+        "games": games,
+        "country": filters_div.get("data-country", "us").strip() or "us",
+        "region": filters_div.get("data-region", "").strip(),
+    }
+
+
+def _fetch_category_props(
+    league: str, category: str, market_key: str, market_filters: dict[str, str]
+) -> list[dict]:
+    """Fetch + parse the full, uncapped list of props for a single market
+    category (e.g. 'Receiving Yards') via Covers' filtered-league-
+    projections endpoint. Returns [] (never raises) on any failure."""
+    url = CATEGORY_PROJECTIONS_URL.format(
+        games=market_filters["games"],
+        market_key=market_key,
+        country=market_filters["country"],
+        region=market_filters["region"],
+    )
+    html = _get_html(url)
+    if not html:
+        print(
+            f"[scraper] {league}/{category} ({market_key}): _get_html() returned nothing "
+            "(request failed or non-200).",
+            file=sys.stderr,
+        )
+        return []
+    return _parse_prop_cards(html, league, log_label=f"{league}/{category}")
+
+
 def fetch_covers_props(league: str, save_debug_html: bool = False) -> list[dict]:
     """Fetch + parse player props for one league ('NFL' or 'CFB').
-    Always returns a list (possibly empty) and never raises."""
+
+    The main league page (COVERS_URLS) only shows a curated ~50-pick "All
+    Markets" feed, not the full market -- see the CATEGORY_MARKET_KEYS
+    comment block above. So this fetches that main page once purely to
+    harvest this week's game ids + detected country/region (via
+    _extract_market_filters), then makes one more request per category in
+    CATEGORY_MARKET_KEYS[league] to get that category's full, uncapped
+    list. Always returns a list (possibly empty) and never raises."""
     url = COVERS_URLS.get(league)
     if not url:
         raise ValueError(f"Unknown league '{league}'. Expected one of {list(COVERS_URLS)}.")
@@ -667,67 +821,69 @@ def fetch_covers_props(league: str, save_debug_html: bool = False) -> list[dict]
         print(f"[scraper] {league}: _get_html() returned nothing (request failed or non-200).", file=sys.stderr)
         return []
 
-    # Diagnostic: tells us whether the raw HTTP response even contains any
-    # prop cards at all, vs. our parser failing to recognize them. If
-    # "picks-card" never appears in the raw response, Covers is either
-    # blocking/serving different content to non-browser requests, or the
-    # props are injected client-side by JavaScript after page load (which
-    # a plain requests.get() never executes) -- either way, that's a
-    # different problem than a parsing bug.
-    raw_card_count = html.count("picks-card")
-    print(
-        f"[scraper] {league}: fetched {len(html)} byte(s) of HTML, "
-        f"'picks-card' appears {raw_card_count} time(s) in the raw response.",
-        file=sys.stderr,
-    )
-
-    # Second-level diagnostic: 'picks-card' shows up in the raw text, but
-    # _parse_prop_cards() (which specifically looks for <section
-    # class="picks-card">) found nothing -- so find out what tag it's
-    # actually attached to, and dump the raw markup around the first hit,
-    # so we can see exactly what changed vs. the confirmed structure.
-    if raw_card_count:
-        debug_soup = BeautifulSoup(html, "lxml")
-        any_tag_matches = debug_soup.find_all(attrs={"class": lambda c: c and "picks-card" in c})
-        tag_names = sorted({t.name for t in any_tag_matches})
-        print(
-            f"[scraper] {league}: found 'picks-card' as a class on {len(any_tag_matches)} "
-            f"element(s), tag name(s): {tag_names}.",
-            file=sys.stderr,
-        )
-        first_idx = html.find("picks-card")
-        snippet = html[max(0, first_idx - 300): first_idx + 700]
-        print(f"[scraper] {league}: raw HTML around first 'picks-card' hit:\n{snippet}", file=sys.stderr)
-
     if save_debug_html:
         debug_dir = Path("debug_html")
         debug_dir.mkdir(exist_ok=True)
         (debug_dir / f"{league.lower()}.html").write_text(html, encoding="utf-8")
 
-    # Primary strategy: Covers' real server-rendered div/card markup.
-    card_rows = _parse_prop_cards(html, league)
-    print(f"[scraper] {league}: _parse_prop_cards() extracted {len(card_rows)} row(s).", file=sys.stderr)
-    if card_rows:
-        return card_rows
-
-    # Fallback 1: Next.js-style embedded JSON, in case a page uses that
-    # pattern instead (kept for resilience against future markup changes).
-    json_rows = _parse_next_data(html)
-    normalized = [r for r in (_normalize_row(r, league) for r in json_rows) if r]
-    if normalized:
-        return normalized
-
-    # Fallback 2: raw <table> extraction (unlikely to hit on this site, but
-    # cheap to keep around). These rows are NOT normalized to the final
-    # schema -- they're surfaced so you can inspect them with --debug.
-    table_rows = _parse_html_tables(html)
-    if table_rows:
+    market_filters = _extract_market_filters(html)
+    if not market_filters:
+        # Couldn't find this week's game-id list on the main page (markup
+        # changed, or there's genuinely no slate posted yet) -- fall back
+        # to whatever the main page's own (capped) card list has, same as
+        # the old single-page approach, rather than coming back with
+        # nothing at all.
         print(
-            f"[scraper] {league}: found {len(table_rows)} raw table row(s) but no "
-            "card/JSON data -- table parsing needs column mapping, see --debug output.",
+            f"[scraper] {league}: couldn't find #market-filters data-games on the main page -- "
+            "falling back to parsing the main page's own (capped, ~50-pick) card list instead. "
+            "Diagnostics below are from that fallback page.",
             file=sys.stderr,
         )
-    return []
+        raw_card_count = html.count("picks-card")
+        print(
+            f"[scraper] {league}: fetched {len(html)} byte(s) of HTML, "
+            f"'picks-card' appears {raw_card_count} time(s) in the raw response.",
+            file=sys.stderr,
+        )
+        card_rows = _parse_prop_cards(html, league)
+        if card_rows:
+            return card_rows
+        json_rows = _parse_next_data(html)
+        normalized = [r for r in (_normalize_row(r, league) for r in json_rows) if r]
+        if normalized:
+            return normalized
+        table_rows = _parse_html_tables(html)
+        if table_rows:
+            print(
+                f"[scraper] {league}: found {len(table_rows)} raw table row(s) but no "
+                "card/JSON data -- table parsing needs column mapping, see --debug output.",
+                file=sys.stderr,
+            )
+        return []
+
+    print(
+        f"[scraper] {league}: market-filters found -- "
+        f"{market_filters['games'].count(',') + 1} game(s) this week, "
+        f"country={market_filters['country']!r}, region={market_filters['region']!r}.",
+        file=sys.stderr,
+    )
+
+    all_rows: list[dict] = []
+    for category, market_key in CATEGORY_MARKET_KEYS.get(league, {}).items():
+        all_rows.extend(_fetch_category_props(league, category, market_key, market_filters))
+
+    if all_rows:
+        return all_rows
+
+    # Every category request came back empty (e.g. nothing posted this
+    # week for any of the 4 markets we care about yet) -- fall back to the
+    # main page's own curated card list rather than nothing at all.
+    print(
+        f"[scraper] {league}: all category requests returned 0 rows -- falling back to the "
+        "main page's own (capped) card list.",
+        file=sys.stderr,
+    )
+    return _parse_prop_cards(html, league)
 
 
 def fetch_all_props(save_debug_html: bool = False) -> pd.DataFrame:
