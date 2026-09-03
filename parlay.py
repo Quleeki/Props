@@ -120,6 +120,18 @@ def price_parlay(
     }
 
 
+def _uses_loose_line_matching(prop_type: str) -> bool:
+    """True for props where different sportsbooks routinely post different
+    numbers for what's still "the same bet" in spirit -- yardage props
+    (e.g. Bet365 Under 78.5, DraftKings Under 76.5), Passing TDs, and
+    Receptions. Anytime TD keeps exact-line matching, since its line is
+    essentially always a fixed 0.5 and an exact match there is meaningful
+    (and this check is deliberately narrow -- "passing td" -- so it
+    doesn't also loosen "Anytime TD" props via a bare "td" substring)."""
+    text = (prop_type or "").lower()
+    return "yards" in text or "passing td" in text or "reception" in text
+
+
 def best_book_parlay(
     all_props: pd.DataFrame,
     selected: pd.DataFrame,
@@ -137,6 +149,17 @@ def best_book_parlay(
     probability (highest payout) is "best". No same-game correlation
     adjustment is applied here -- this reflects an actual bookmaker payout,
     not a model estimate of true win probability.
+
+    Yardage props, Passing TDs, and Receptions (see _uses_loose_line_matching)
+    match more loosely -- by (Player, PropType) only, ignoring the exact
+    CoversLine -- since real sportsbooks commonly post different lines for
+    the same market (e.g. Under 78.5 at one book, Under 76.5 at another),
+    and requiring an exact number match there would make "which book has
+    my whole parlay" almost never find a hit. When more than one line is
+    available at a book for a loosely-matched leg, the one closest to the
+    selected leg's own line is used. Anytime TD still requires an exact
+    CoversLine match, since its line is essentially fixed at 0.5 and an
+    exact match there is meaningful.
 
     Returns {"has_complete_book": bool, "best": {...} | None,
     "all_books": [...]} -- all_books is sorted best-to-worst payout among
@@ -160,14 +183,19 @@ def best_book_parlay(
         odds_for_legs = []
         complete = True
         for player, prop_type, line in leg_keys:
-            match = book_df[
-                (book_df["Player"] == player)
-                & (book_df["PropType"] == prop_type)
-                & (book_df["CoversLine"] == line)
-            ]
-            if match.empty:
+            candidates = book_df[(book_df["Player"] == player) & (book_df["PropType"] == prop_type)]
+            if not _uses_loose_line_matching(prop_type):
+                candidates = candidates[candidates["CoversLine"] == line]
+
+            if candidates.empty:
                 complete = False
                 break
+
+            if len(candidates) > 1:
+                closest_idx = (candidates["CoversLine"] - line).abs().idxmin()
+                match = candidates.loc[[closest_idx]]
+            else:
+                match = candidates
             odds_for_legs.append(match.iloc[0][odds_col])
 
         if not complete:
@@ -193,4 +221,3 @@ def best_book_parlay(
         "best": results[0] if results else None,
         "all_books": results,
     }
-
