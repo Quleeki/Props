@@ -463,7 +463,22 @@ def fetch_covers_props(league: str, save_debug_html: bool = False) -> list[dict]
 
     html = _get_html(url)
     if not html:
+        print(f"[scraper] {league}: _get_html() returned nothing (request failed or non-200).", file=sys.stderr)
         return []
+
+    # Diagnostic: tells us whether the raw HTTP response even contains any
+    # prop cards at all, vs. our parser failing to recognize them. If
+    # "picks-card" never appears in the raw response, Covers is either
+    # blocking/serving different content to non-browser requests, or the
+    # props are injected client-side by JavaScript after page load (which
+    # a plain requests.get() never executes) -- either way, that's a
+    # different problem than a parsing bug.
+    raw_card_count = html.count("picks-card")
+    print(
+        f"[scraper] {league}: fetched {len(html)} byte(s) of HTML, "
+        f"'picks-card' appears {raw_card_count} time(s) in the raw response.",
+        file=sys.stderr,
+    )
 
     if save_debug_html:
         debug_dir = Path("debug_html")
@@ -472,6 +487,7 @@ def fetch_covers_props(league: str, save_debug_html: bool = False) -> list[dict]
 
     # Primary strategy: Covers' real server-rendered div/card markup.
     card_rows = _parse_prop_cards(html, league)
+    print(f"[scraper] {league}: _parse_prop_cards() extracted {len(card_rows)} row(s).", file=sys.stderr)
     if card_rows:
         return card_rows
 
