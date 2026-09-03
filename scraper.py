@@ -100,11 +100,26 @@ REQUEST_HEADERS = {
 
 REQUEST_TIMEOUT = 20
 
-# If set, route the request through ScrapingBee for JS rendering / anti-bot
-# handling instead of a plain requests.get(). Cheaper than Apify per the
-# original design discussion; only kicks in if the key is present.
+# If set, route the request through ScrapingBee instead of a plain
+# requests.get(). Originally added for JS rendering, but it turns out
+# Covers' real blocker is geography, not JavaScript: Covers decides which
+# sportsbooks to render (DraftKings/BetMGM/Bet365/theScore Bet vs. the
+# nationwide-legal prediction markets like Kalshi/Polymarket) based on the
+# requester's US location, and a cloud server's data-center IP doesn't
+# resolve to any betting-legal state. Routing through ScrapingBee's
+# premium/residential proxy pool, geo-targeted to the US, gets us a real
+# US residential IP instead -- which should land in a state where your
+# preferred books actually operate (most populous states have all four by
+# now), though which exact state isn't something we can pin down further
+# without a pricier state-level-targeting proxy provider.
 SCRAPINGBEE_API_KEY = os.environ.get("SCRAPINGBEE_API_KEY", "").strip()
 SCRAPINGBEE_ENDPOINT = "https://app.scrapingbee.com/api/v1/"
+SCRAPINGBEE_COUNTRY_CODE = os.environ.get("SCRAPINGBEE_COUNTRY_CODE", "us").strip()
+# JS rendering costs extra ScrapingBee credits and Covers' props pages are
+# confirmed server-rendered (see scraper.py's module docstring), so this
+# defaults off to save credits; set SCRAPINGBEE_RENDER_JS=true to re-enable
+# it if a future markup change ever makes it necessary again.
+SCRAPINGBEE_RENDER_JS = os.environ.get("SCRAPINGBEE_RENDER_JS", "false").strip().lower() == "true"
 
 # Best-effort key aliases for mapping an unknown JSON payload's field names
 # onto our schema. Extend this once you've inspected a real __NEXT_DATA__
@@ -123,25 +138,30 @@ JSON_KEY_ALIASES = {
 
 
 def _get_html(url: str) -> str | None:
-    """Fetch raw HTML, optionally proxied through ScrapingBee for JS
-    rendering. Returns None (never raises) on any failure so callers can
-    fall back cleanly."""
+    """Fetch raw HTML, optionally proxied through ScrapingBee -- geo-
+    targeted to the US via a premium/residential proxy, so Covers sees a
+    real US IP instead of a cloud data-center IP (see SCRAPINGBEE_* above
+    for why that matters). Returns None (never raises) on any failure so
+    callers can fall back cleanly."""
     try:
         if SCRAPINGBEE_API_KEY:
-            resp = requests.get(
-                SCRAPINGBEE_ENDPOINT,
-                params={
-                    "api_key": SCRAPINGBEE_API_KEY,
-                    "url": url,
-                    "render_js": "true",
-                },
-                timeout=REQUEST_TIMEOUT,
-            )
+            params = {
+                "api_key": SCRAPINGBEE_API_KEY,
+                "url": url,
+                "render_js": "true" if SCRAPINGBEE_RENDER_JS else "false",
+                "premium_proxy": "true",
+                "country_code": SCRAPINGBEE_COUNTRY_CODE,
+            }
+            resp = requests.get(SCRAPINGBEE_ENDPOINT, params=params, timeout=REQUEST_TIMEOUT)
         else:
             resp = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
 
         if resp.status_code != 200:
-            print(f"[scraper] {url} -> HTTP {resp.status_code}", file=sys.stderr)
+            print(
+                f"[scraper] {url} -> HTTP {resp.status_code}"
+                f"{' (via ScrapingBee: ' + resp.text[:300] + ')' if SCRAPINGBEE_API_KEY else ''}",
+                file=sys.stderr,
+            )
             return None
         return resp.text
     except requests.RequestException as exc:
