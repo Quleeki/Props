@@ -61,6 +61,20 @@ Covers tweaks their markup again in the future.
 The app (app.py) calls fetch_all_props() and gracefully falls back to
 sample_data.py if this returns no rows (e.g. NFL/NCAAF simply have no
 props posted yet), so the dashboard is always usable either way.
+
+DATA SOURCE FALLBACK (per card, not per page): Covers decides which
+sportsbooks to render based on the *visitor's* US location -- a data-center
+IP (or a ScrapingBee proxy that lands in a state without your books) gets
+served nationwide-legal prediction markets (Novig, Kalshi, Polymarket,
+ProphetX, Underdog) instead of DraftKings/BetMGM/Bet365/theScore Bet for
+that card. Rather than discarding those cards, each one independently
+falls back to its prediction-market pricing when NONE of PREFERRED_SPORTSBOOKS
+priced it, and is tagged DataSource="COVERS_PREDICTION_MARKET" instead of
+"COVERS" so the app can show that distinction to the user. Prediction
+markets price as an implied-probability percentage (e.g. "o5.5 52%" or a
+bare "52%" for a yes/no market like Anytime TD) rather than American odds --
+see _parse_prediction_market_odds. Every row -- from either source -- then
+gets its ModelFairOdds/EdgePct filled in by model.py's estimate_fair_odds().
 """
 
 from __future__ import annotations
@@ -77,17 +91,31 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as dateutil_parser
 
+from model import estimate_fair_odds
+from parlay import prob_to_american
+
 COVERS_URLS = {
     "NFL": "https://www.covers.com/sport/football/nfl/player-props",
     "CFB": "https://www.covers.com/sport/football/ncaaf/player-props",
 }
 
-# Only these sportsbooks' odds are kept from live scrapes -- everything else
-# Covers lists (FanDuel, Caesars, etc.) is silently dropped. Match against
-# the lowercased, space-stripped slug Covers uses in its data-tracking
-# attributes (see _format_sportsbook_name below for the slug -> display-name
-# mapping). Edit this set to change which books show up in the app.
+# Only these sportsbooks' odds are kept as "real sportsbook" rows from live
+# scrapes -- everything else Covers lists (FanDuel, Caesars, etc.) is
+# silently dropped. Match against the lowercased, space-stripped slug Covers
+# uses (see _format_sportsbook_name below for the slug -> display-name
+# mapping). Edit this set to change which books show up as DataSource="COVERS".
 PREFERRED_SPORTSBOOKS = {"draftkings", "betmgm", "bet365", "thescore", "thescorebet"}
+
+# Nationwide-legal prediction markets Covers falls back to showing on a
+# per-card basis when the visitor's location doesn't resolve to a state
+# carrying your preferred sportsbooks (see the module docstring, and the
+# SCRAPINGBEE_* comment below, for why that happens). Kept separate from
+# PREFERRED_SPORTSBOOKS since their prices are implied-probability
+# percentages, not American odds -- see _parse_prediction_market_odds.
+# Rows sourced from these are only used for a card when none of
+# PREFERRED_SPORTSBOOKS priced that specific prop, and are tagged
+# DataSource="COVERS_PREDICTION_MARKET".
+PREDICTION_MARKETS = {"novig", "kalshi", "kalshisports", "polymarket", "prophetx", "underdog"}
 
 REQUEST_HEADERS = {
     "User-Agent": (
@@ -258,6 +286,10 @@ def _parse_html_tables(html: str) -> list[dict]:
 # is just the visible text inside the odds link/span.
 _SIDE_LINE_ODDS_RE = re.compile(r"^([ou])\s*([\d.]+)\D*?([+\-]\d+)$", re.IGNORECASE)
 
+# Matches a bare moneyline with no line number at all, e.g. "+145" or
+# "-200" -- how Covers prices yes/no props like Anytime TD.
+_MONEYLINE_RE = re.compile(r"^([+\-]\d+)$")
+
 # Matches the odds-comparison "expand" button's data-tracking "text" field,
 # e.g. "NO vs DET, Sun, Sep 13 . 1:00 PM ET" -> team, opponent, date/time.
 # (This is the one JSON blob that's still present in the current markup.)
@@ -280,6 +312,13 @@ _SPORTSBOOK_NAME_MAP = {
     "hardrockbet": "Hard Rock Bet",
     "thescore": "theScore Bet",
     "thescorebet": "theScore Bet",
+    # -- Prediction markets (see PREDICTION_MARKETS above) --
+    "novig": "Novig",
+    "kalshi": "Kalshi",
+    "kalshisports": "Kalshi",
+    "polymarket": "Polymarket",
+    "prophetx": "ProphetX",
+    "underdog": "Underdog",
 }
 
 
@@ -294,21 +333,91 @@ def _clean_book_alt(alt: str) -> str:
     return re.sub(r"\s*logo\s*$", "", alt or "", flags=re.IGNORECASE).strip()
 
 
+def _title_case_prop_type(text: str) -> str:
+    """Title-case a badge like 'PASSING TDS' -> 'Passing Tds' the naive
+    way, then fix up the common acronym Python's str.title() mangles:
+    'Td'/'Tds' -> 'TD'/'TDs' (e.g. 'Anytime Td' -> 'Anytime TD')."""
+    titled = text.title()
+    titled = re.sub(r"\bTds\b", "TDs", titled)
+    titled = re.sub(r"\bTd\b", "TD", titled)
+    return titled
+
+
 def _parse_side_line_odds(text: str) -> tuple[str, float, int] | None:
-    """Parse the visible odds text on a link/span, e.g. 'u78.5 -110' ->
-    ('Under', 78.5, -110). Returns None for anything that doesn't match --
-    including a book with no price posted, which Covers shows as a bare
-    '-' with no over/under letter or line number in front of it."""
+    """Parse the visible odds text on a link/span. Handles two shapes:
+
+    - An over/under line, e.g. 'u78.5 -110' -> ('Under', 78.5, -110).
+    - A bare moneyline with no line number at all, e.g. '+145' -- this is
+      how Covers prices yes/no props like Anytime TD (there's no "line" to
+      go over/under, just "does it happen"). Treated as ('Over', 0.5, odds)
+      so it flows through the same schema as everything else, matching the
+      Anytime TD convention already used in sample_data.py.
+
+    Returns None for anything that doesn't match either shape -- including
+    a book with no price posted, which Covers shows as a bare '-'."""
     cleaned = text.replace("\xa0", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
     m = _SIDE_LINE_ODDS_RE.match(cleaned)
-    if not m:
-        return None
-    side, line_str, odds_str = m.groups()
-    try:
-        return ("Over" if side.lower() == "o" else "Under", float(line_str), int(odds_str))
-    except ValueError:
-        return None
+    if m:
+        side, line_str, odds_str = m.groups()
+        try:
+            return ("Over" if side.lower() == "o" else "Under", float(line_str), int(odds_str))
+        except ValueError:
+            return None
+
+    m = _MONEYLINE_RE.match(cleaned)
+    if m:
+        try:
+            return ("Over", 0.5, int(m.group(1)))
+        except ValueError:
+            return None
+
+    return None
+
+
+# Matches prediction-market pricing with an explicit side/line, e.g.
+# "o5.5 52%" -> ('Over', 5.5, '52'). The number is the market's implied
+# probability of that side happening (a percentage), NOT American odds.
+_SIDE_LINE_PCT_RE = re.compile(r"^([ou])\s*([\d.]+)\D*?(\d+(?:\.\d+)?)\s*%$", re.IGNORECASE)
+
+# Matches a bare probability percentage with no line at all, e.g. "52%" --
+# how prediction markets like Kalshi/Novig price yes/no props such as
+# Anytime TD (there's no "line" to go over/under, just "does it happen").
+_MONEYLINE_PCT_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*%$")
+
+
+def _parse_prediction_market_odds(text: str) -> tuple[str, float, int] | None:
+    """Parse a prediction market's odds text (PREDICTION_MARKETS), which is
+    an implied-probability percentage rather than American odds -- e.g.
+    'o5.5 52%' -> ('Over', 5.5, <odds>), or a bare '52%' for a yes/no
+    market. The percentage is converted straight to American odds via
+    prob_to_american() so these rows flow through the exact same schema as
+    sportsbook rows everywhere downstream (parlay pricing, the model, etc).
+
+    Returns None for anything that doesn't match either shape, including an
+    unpriced market (shown on Covers as a bare '-')."""
+    cleaned = text.replace("\xa0", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
+    m = _SIDE_LINE_PCT_RE.match(cleaned)
+    if m:
+        side, line_str, pct_str = m.groups()
+        try:
+            prob = min(max(float(pct_str) / 100.0, 0.0001), 0.9999)
+            return ("Over" if side.lower() == "o" else "Under", float(line_str), prob_to_american(prob))
+        except ValueError:
+            return None
+
+    m = _MONEYLINE_PCT_RE.match(cleaned)
+    if m:
+        try:
+            prob = min(max(float(m.group(1)) / 100.0, 0.0001), 0.9999)
+            return ("Over", 0.5, prob_to_american(prob))
+        except ValueError:
+            return None
+
+    return None
 
 
 def _parse_prop_cards(html: str, league: str) -> list[dict]:
@@ -334,6 +443,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         "no_compare_div": 0,
         "compare_columns_seen": 0,
         "compare_text_parse_fail": 0,
+        "cards_used_prediction_market_fallback": 0,
     }
     sample_texts: list[str] = []  # first couple of raw odds texts we actually saw, for debugging
 
@@ -359,7 +469,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         # text if the badge isn't there for some reason.
         badge_tag = card.find("span", class_="_badge")
         if badge_tag and badge_tag.get_text(strip=True):
-            prop_type = badge_tag.get_text(strip=True).title()
+            prop_type = _title_case_prop_type(badge_tag.get_text(strip=True))
         else:
             prediction_tag = category_title.find("span", class_="prediction")
             prediction_text = prediction_tag.get_text(strip=True) if prediction_tag else ""
@@ -392,7 +502,8 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                 except (ValueError, OverflowError, TypeError):
                     game_time_iso = None
 
-        book_rows = []
+        book_rows = []       # priced by a PREFERRED_SPORTSBOOKS book
+        fallback_rows = []   # priced only by a PREDICTION_MARKETS source
         seen = set()
 
         def _maybe_add_book(book_name_raw: str, odds_text: str, *, is_best: bool) -> None:
@@ -401,22 +512,29 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
             book_name = _format_sportsbook_name(_clean_book_alt(book_name_raw))
             if not book_name:
                 return
-            parsed = _parse_side_line_odds(odds_text)
+            book_key = re.sub(r"[^a-z0-9]", "", book_name.lower())
+
+            if book_key in PREFERRED_SPORTSBOOKS:
+                parsed = _parse_side_line_odds(odds_text)
+                target_list = book_rows
+            elif book_key in PREDICTION_MARKETS:
+                parsed = _parse_prediction_market_odds(odds_text)
+                target_list = fallback_rows
+            else:
+                return  # not a book/market we track at all -- skip it
+
             if not parsed:
                 if is_best:
                     stats["best_text_parse_fail"] += 1
                 else:
                     stats["compare_text_parse_fail"] += 1
-                return  # no price posted at this book for this prop
+                return  # no usable price posted at this source for this prop
             side, line_val, odds_val = parsed
-            book_key = re.sub(r"[^a-z0-9]", "", book_name.lower())
-            if book_key not in PREFERRED_SPORTSBOOKS:
-                return  # not one of your preferred books -- skip it
             dedupe_key = (book_key, side, line_val, odds_val)
             if dedupe_key in seen:
                 return  # e.g. the "best odds" book also appears in compare-odds
             seen.add(dedupe_key)
-            book_rows.append({"side": side, "line": line_val, "odds": odds_val, "sportsbook": book_name})
+            target_list.append({"side": side, "line": line_val, "odds": odds_val, "sportsbook": book_name})
 
         # -- Best-odds block: a single highlighted book + price.
         best_odds_div = card.find("div", class_="best-odd-container")
@@ -447,11 +565,19 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                         continue
                     _maybe_add_book(img.get("alt", "") if img else "", link.get_text(" ", strip=True), is_best=False)
 
-        if not book_rows:
+        # Prefer real sportsbook rows; only fall back to prediction-market
+        # pricing for this card if NONE of your preferred books had a price
+        # for it (see PREDICTION_MARKETS / module docstring).
+        if book_rows:
+            rows_to_emit, data_source = book_rows, "COVERS"
+        elif fallback_rows:
+            rows_to_emit, data_source = fallback_rows, "COVERS_PREDICTION_MARKET"
+            stats["cards_used_prediction_market_fallback"] += 1
+        else:
             stats["no_book_rows"] += 1
-            continue  # couldn't recover any priced odds for this card
+            continue  # couldn't recover any priced odds for this card, from either source
 
-        for book in book_rows:
+        for book in rows_to_emit:
             rows.append(
                 {
                     "League": league,
@@ -465,17 +591,19 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                     "CoversLine": book["line"],
                     "SportsbookOdds": book["odds"],
                     "Sportsbook": book["sportsbook"],
-                    "ModelFairOdds": book["odds"],
+                    "ModelFairOdds": book["odds"],  # placeholder -- estimate_fair_odds() fills this in
                     "EdgePct": 0.0,
                     "InjuryStatus": "",
-                    "DataSource": "COVERS",
+                    "DataSource": data_source,
                 }
             )
 
     print(
         f"[scraper] {league}: card funnel -- found {stats['total_cards']} <section class=picks-card>, "
         f"{stats['no_category_title']} missing category-title, {stats['no_player_link']} missing player-link, "
-        f"{stats['no_book_rows']} had no usable book odds, {len(rows)} row(s) emitted.",
+        f"{stats['no_book_rows']} had no usable odds from any tracked source, "
+        f"{stats['cards_used_prediction_market_fallback']} fell back to prediction-market pricing "
+        f"(no preferred sportsbook), {len(rows)} row(s) emitted.",
         file=sys.stderr,
     )
     print(
@@ -614,6 +742,12 @@ def fetch_all_props(save_debug_html: bool = False) -> pd.DataFrame:
     df = pd.DataFrame(all_rows)
     if not df.empty and "GameTime" in df.columns:
         df["GameTime"] = pd.to_datetime(df["GameTime"], errors="coerce")
+    if not df.empty:
+        # Fill in real ModelFairOdds/EdgePct from the actual priced data
+        # (multi-source consensus or a single-source vig haircut -- see
+        # model.py), replacing the odds==fair-odds/0%-edge placeholders
+        # each row was built with above.
+        df = estimate_fair_odds(df)
     return df
 
 
