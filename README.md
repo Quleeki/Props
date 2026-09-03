@@ -38,21 +38,33 @@ the ticket at the bottom updates live.
 - `https://www.covers.com/sport/football/nfl/player-props`
 - `https://www.covers.com/sport/football/ncaaf/player-props`
 
-**Update:** the scraper's parsing logic has been verified against a real,
-live saved copy of Covers' MLB player-props page (which had live data,
-unlike NFL/NCAAF at time of writing — Week 1 props hadn't posted yet).
-Covers server-renders each prop as a `.category-title` "card" with a
+**Update:** those two URLs only render a curated "All Markets" feed of
+roughly the site's top 50 picks per league — NOT the full market. Real
+NFL/NCAAF markup confirmed each prop is a `.category-title` "card" with a
 `.best-odd-container` for the top line and a linked `.compare-odds-table`
-for the rest of the sportsbooks — see the full breakdown in the comment
-block at the top of `scraper.py`. This is a stable, non-JS-rendered
-structure (no hidden API call needed), and `_parse_prop_cards()` targets it
-directly. It correctly extracted player, position, matchup, kickoff time,
-prop type/line, and odds across all 3 sportsbooks on the real test card.
+for the rest of the sportsbooks (see the full breakdown in the comment
+block at the top of `scraper.py`), and that structure is a stable,
+non-JS-rendered server response (no hidden API call needed) — but that
+curated feed itself is a small, capped slice of what Covers actually has
+posted.
 
-Since NFL/NCAAF render the same way MLB does, this should "just work" the
-moment Covers posts real Week 1 props — no further changes should be
-needed. If it ever comes back empty despite props clearly being live on
-the site, Covers likely changed their markup again; re-run:
+The full list per market comes from a separate, discoverable endpoint
+Covers' own category filters use internally (`.../picks/filtered-league-
+projections/mlb/<game ids>/<market key>?country=<cc>&region=<r>` —
+"mlb" is a fixed literal path segment for this endpoint regardless of
+sport). `fetch_covers_props()` fetches the main league page once just to
+read this week's game-id list and detected country/region off its
+`<div id="market-filters">` element, then makes one more request per
+market in `CATEGORY_MARKET_KEYS` (Anytime TD, Receiving Yards, Receptions,
+Passing TDs for now) to that endpoint, each of which returns the full,
+uncapped `<section class="picks-card">` list for that one market — the
+exact same card markup, parsed by the exact same `_parse_prop_cards()`.
+This means roughly 5 HTTP requests per league per refresh instead of 1 —
+worth watching if you're on a metered ScrapingBee plan/trial (see below).
+
+If `_parse_prop_cards()` ever comes back empty across the board despite
+props clearly being live on the site, Covers likely changed their markup
+again; re-run:
 
 ```bash
 python scraper.py --debug
