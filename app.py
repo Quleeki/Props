@@ -180,6 +180,11 @@ st.caption(
 )
 
 df, data_source = load_props_data()
+print(
+    f"[app] data loaded: {len(df)} row(s) total, data_source={data_source}"
+    + (f", by League: {df['League'].value_counts().to_dict()}" if "League" in df.columns else ""),
+    file=sys.stderr,
+)
 
 col_refresh, col_status = st.columns([1, 5])
 with col_refresh:
@@ -279,6 +284,11 @@ correlation_multiplier = st.sidebar.slider(
 # row index also doubles as the stable id used to track parlay selections
 # below, independent of whatever filter/sort/search view is on screen.
 capped_df = apply_longshot_filter(df, enforce_cap)
+print(
+    f"[app] after WR/RB +{WR_RB_LONGSHOT_CAP} cap (enforce_cap={enforce_cap}): {len(capped_df)} row(s) remain"
+    + (f", by League: {capped_df['League'].value_counts().to_dict()}" if "League" in capped_df.columns else ""),
+    file=sys.stderr,
+)
 working_df = capped_df[
     capped_df["League"].isin(selected_leagues)
     & capped_df["Position"].isin(selected_positions)
@@ -298,6 +308,13 @@ working_df = working_df.sort_values(by=sort_label_map[sort_label], ascending=sor
 # easier 218.5 one. The full multi-book working_df/capped_df is untouched
 # and still what the parlay ticket's cross-book matching uses.
 display_df = best_line_per_prop(working_df)
+print(
+    f"[app] working_df (after sidebar filters/search, before best_line_per_prop): {len(working_df)} row(s)"
+    + (f", by League: {working_df['League'].value_counts().to_dict()}" if "League" in working_df.columns else "")
+    + f" -- display_df (after best_line_per_prop collapse): {len(display_df)} row(s)"
+    + (f", by League: {display_df['League'].value_counts().to_dict()}" if "League" in display_df.columns else ""),
+    file=sys.stderr,
+)
 if "DataSource" in display_df.columns:
     display_df = display_df.copy()
     display_df["Source"] = display_df["DataSource"].map(_SOURCE_LABELS).fillna(display_df["DataSource"])
