@@ -300,12 +300,22 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
     soup = BeautifulSoup(html, "lxml")
     rows: list[dict] = []
 
-    for card in soup.find_all("section", class_="picks-card"):
+    # Funnel counters -- printed at the end so we can see exactly which
+    # step is dropping cards if this ever comes back empty again, instead
+    # of just knowing the final row count.
+    stats = {"total_cards": 0, "no_category_title": 0, "no_player_link": 0, "no_book_rows": 0}
+
+    all_cards = soup.find_all("section", class_="picks-card")
+    stats["total_cards"] = len(all_cards)
+
+    for card in all_cards:
         category_title = card.find("div", class_="category-title")
         if not category_title:
+            stats["no_category_title"] += 1
             continue
         player_link = category_title.find("a", class_="player-link")
         if not player_link:
+            stats["no_player_link"] += 1
             continue
         player_name = player_link.get_text(strip=True)
 
@@ -393,6 +403,7 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                     _maybe_add_book(img.get("alt", "") if img else "", link.get_text(" ", strip=True))
 
         if not book_rows:
+            stats["no_book_rows"] += 1
             continue  # couldn't recover any priced odds for this card
 
         for book in book_rows:
@@ -415,6 +426,13 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
                     "DataSource": "COVERS",
                 }
             )
+
+    print(
+        f"[scraper] {league}: card funnel -- found {stats['total_cards']} <section class=picks-card>, "
+        f"{stats['no_category_title']} missing category-title, {stats['no_player_link']} missing player-link, "
+        f"{stats['no_book_rows']} had no usable book odds, {len(rows)} row(s) emitted.",
+        file=sys.stderr,
+    )
 
     return rows
 
