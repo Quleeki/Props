@@ -303,7 +303,19 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
     # Funnel counters -- printed at the end so we can see exactly which
     # step is dropping cards if this ever comes back empty again, instead
     # of just knowing the final row count.
-    stats = {"total_cards": 0, "no_category_title": 0, "no_player_link": 0, "no_book_rows": 0}
+    stats = {
+        "total_cards": 0,
+        "no_category_title": 0,
+        "no_player_link": 0,
+        "no_book_rows": 0,
+        "no_best_odds_div": 0,
+        "no_best_link": 0,
+        "best_text_parse_fail": 0,
+        "no_compare_div": 0,
+        "compare_columns_seen": 0,
+        "compare_text_parse_fail": 0,
+    }
+    sample_texts: list[str] = []  # first couple of raw odds texts we actually saw, for debugging
 
     all_cards = soup.find_all("section", class_="picks-card")
     stats["total_cards"] = len(all_cards)
@@ -363,12 +375,18 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         book_rows = []
         seen = set()
 
-        def _maybe_add_book(book_name_raw: str, odds_text: str) -> None:
+        def _maybe_add_book(book_name_raw: str, odds_text: str, *, is_best: bool) -> None:
+            if len(sample_texts) < 6:
+                sample_texts.append(f"alt={book_name_raw!r} text={odds_text!r}")
             book_name = _format_sportsbook_name(_clean_book_alt(book_name_raw))
             if not book_name:
                 return
             parsed = _parse_side_line_odds(odds_text)
             if not parsed:
+                if is_best:
+                    stats["best_text_parse_fail"] += 1
+                else:
+                    stats["compare_text_parse_fail"] += 1
                 return  # no price posted at this book for this prop
             side, line_val, odds_val = parsed
             book_key = re.sub(r"[^a-z0-9]", "", book_name.lower())
@@ -382,11 +400,15 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
 
         # -- Best-odds block: a single highlighted book + price.
         best_odds_div = card.find("div", class_="best-odd-container")
-        if best_odds_div:
+        if not best_odds_div:
+            stats["no_best_odds_div"] += 1
+        else:
             best_link = best_odds_div.find("a", class_="deeplink")
-            if best_link:
+            if not best_link:
+                stats["no_best_link"] += 1
+            else:
                 img = best_link.find("img")
-                _maybe_add_book(img.get("alt", "") if img else "", best_link.get_text(" ", strip=True))
+                _maybe_add_book(img.get("alt", "") if img else "", best_link.get_text(" ", strip=True), is_best=True)
 
         # -- Odds-comparison panel: one column per sportsbook Covers
         # tracks. Lives inside the same card, addressable by the id the
@@ -394,13 +416,16 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         if expand_btn:
             target = expand_btn.get("data-bs-target", "")
             compare_div = soup.find(id=target[1:]) if target.startswith("#") else None
-            if compare_div:
+            if not compare_div:
+                stats["no_compare_div"] += 1
+            else:
                 for column in compare_div.find_all("div", class_="compare-odds-column"):
+                    stats["compare_columns_seen"] += 1
                     img = column.find("img")
                     link = column.find("a", class_="book-odds")
                     if not link:
                         continue
-                    _maybe_add_book(img.get("alt", "") if img else "", link.get_text(" ", strip=True))
+                    _maybe_add_book(img.get("alt", "") if img else "", link.get_text(" ", strip=True), is_best=False)
 
         if not book_rows:
             stats["no_book_rows"] += 1
@@ -433,6 +458,16 @@ def _parse_prop_cards(html: str, league: str) -> list[dict]:
         f"{stats['no_book_rows']} had no usable book odds, {len(rows)} row(s) emitted.",
         file=sys.stderr,
     )
+    print(
+        f"[scraper] {league}: odds-extraction detail -- "
+        f"no_best_odds_div={stats['no_best_odds_div']}, no_best_link={stats['no_best_link']}, "
+        f"best_text_parse_fail={stats['best_text_parse_fail']}, no_compare_div={stats['no_compare_div']}, "
+        f"compare_columns_seen={stats['compare_columns_seen']}, "
+        f"compare_text_parse_fail={stats['compare_text_parse_fail']}.",
+        file=sys.stderr,
+    )
+    for s in sample_texts:
+        print(f"[scraper] {league}: sample odds text seen -- {s}", file=sys.stderr)
 
     return rows
 
