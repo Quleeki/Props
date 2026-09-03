@@ -10,6 +10,8 @@ remove them directly from the ticket.
 
 from __future__ import annotations
 
+import sys
+
 import pandas as pd
 import streamlit as st
 
@@ -47,11 +49,20 @@ def load_props_data() -> tuple[pd.DataFrame, bool]:
     try:
         live_df = scraper.fetch_all_props()
     except Exception:
+        # Print the full traceback so it shows up in Streamlit Cloud's
+        # "Manage app" logs -- otherwise a real bug here fails silently
+        # and just looks like "no live props available".
+        import traceback
+
+        print("[app] fetch_all_props() raised an exception:", file=sys.stderr)
+        traceback.print_exc()
         live_df = pd.DataFrame()
 
     if live_df is not None and not live_df.empty:
+        print(f"[app] loaded {len(live_df)} live row(s) from Covers.com.", file=sys.stderr)
         return live_df, True
 
+    print("[app] no live rows -- falling back to sample data.", file=sys.stderr)
     return sample_data.get_sample_data(), False
 
 
