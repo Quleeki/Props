@@ -10,8 +10,12 @@ IMPORTANT: This is illustrative sample data for building/testing the
 dashboard, NOT real, current sportsbook odds. Player/team info reflects
 rosters as commonly known as of mid-2025 and may be stale by the time you
 run this -- always verify against the live source before using this for
-real betting decisions. Odds, lines, and "model" edges below are
-synthetically generated for demo purposes only.
+real betting decisions. Lines/odds below are synthetically generated for
+demo purposes only -- but ModelFairOdds/EdgePct are computed by the exact
+same model.py used for live data (multi-source consensus per prop, since
+each prop here is priced at 2-4 sportsbooks -- see get_sample_data), so the
+"Edge %" column behaves identically to how it works with real Covers.com
+data.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import random
 
 import pandas as pd
 
-from parlay import american_to_prob, prob_to_american
+from model import estimate_fair_odds
 
 # Fixed seed so the demo dataset is stable/reproducible between runs.
 _RNG = random.Random(42)
@@ -63,21 +67,6 @@ _RAW_ROWS = [
     ("CFB", "WR", "Antonio Williams", "CLEM", "LSU", "vs", "2026-09-06 15:30", "Receiving Yards", 76.5, +145),
     ("CFB", "QB", "Fernando Mendoza", "IND", "OSU", "@", "2026-09-06 12:00", "Passing TDs", 1.5, -120),
 ]
-
-
-def _edge_and_fair_odds(covers_odds: int) -> tuple[float, int]:
-    """
-    Derive an internally-consistent 'model fair odds' + edge% from the
-    covers/book odds, using a randomized edge so the demo set has both
-    positive and negative edges (mirroring the original spec's example
-    rows, including a WR/RB longshot with negative edge that the +125
-    filter is meant to catch before it ever reaches the grid).
-    """
-    implied_prob = american_to_prob(covers_odds)
-    edge_pct = _RNG.uniform(-3.0, 8.0)
-    fair_prob = min(max(implied_prob * (1 + edge_pct / 100.0), 0.01), 0.98)
-    fair_odds = prob_to_american(fair_prob)
-    return round(edge_pct, 1), fair_odds
 
 
 def _jitter_odds(base_odds: int) -> int:
@@ -146,7 +135,6 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
 
         for sportsbook in available_books:
             book_odds = _jitter_odds(base_odds)
-            edge_pct, fair_odds = _edge_and_fair_odds(book_odds)
 
             rows.append(
                 {
@@ -161,8 +149,8 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
                     "CoversLine": line,
                     "SportsbookOdds": book_odds,
                     "Sportsbook": sportsbook,
-                    "ModelFairOdds": fair_odds,
-                    "EdgePct": edge_pct,
+                    "ModelFairOdds": book_odds,  # placeholder -- estimate_fair_odds() fills this in below
+                    "EdgePct": 0.0,
                     "InjuryStatus": injury,
                     "DataSource": "SAMPLE",
                 }
@@ -171,6 +159,11 @@ def get_sample_data(leagues: list[str] | None = None) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if not df.empty:
         df["GameTime"] = pd.to_datetime(df["GameTime"])
+        # Same consensus-or-vig-haircut model used for live Covers.com data
+        # (see model.py) -- each prop here is already priced at 2-4 books
+        # (available_books above), so most rows get real multi-source
+        # consensus rather than the single-source haircut.
+        df = estimate_fair_odds(df)
     return df
 
 
