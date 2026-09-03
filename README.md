@@ -10,8 +10,9 @@ correlation) as you check boxes.
 | File | Purpose |
 |---|---|
 | `app.py` | The Streamlit dashboard — filters, sorting, grid, parlay ticket. |
-| `scraper.py` | Live scraper for the two Covers.com player-props pages (NFL + NCAAF). |
-| `sample_data.py` | Fallback/demo data used whenever the scraper returns nothing. |
+| `scraper.py` | Live scraper for the two Covers.com player-props pages (NFL + NCAAF), with a per-prop fallback to prediction-market pricing (see below). |
+| `sample_data.py` | Fallback/demo data used whenever Covers returns nothing postable at all. |
+| `model.py` | Fair-odds/edge estimation — multi-source consensus or a single-source vig haircut. Used for both live and sample data. |
 | `parlay.py` | Odds math: American ↔ probability conversions, parlay pricing, SGP correlation. |
 | `requirements.txt` | Python dependencies. |
 | `.streamlit/config.toml` | Dark theme + headless server config. |
@@ -70,6 +71,61 @@ automatically falls back to the bundled sample data in `sample_data.py` and
 shows a banner saying so. Nothing about the dashboard's filtering/sorting/
 parlay logic changes based on which data source is active; they share the
 exact same schema.
+
+### Three-tier fallback: sportsbook → prediction market → sample data
+
+The fallback actually happens **per prop, not per page load**. For each
+card Covers renders:
+
+1. If any of `PREFERRED_SPORTSBOOKS` (DraftKings/BetMGM/Bet365/theScore
+   Bet) priced it, those rows are used — tagged `DataSource="COVERS"`.
+2. Otherwise, if any of `PREDICTION_MARKETS` (Kalshi, Novig, Polymarket,
+   ProphetX, Underdog) priced it, those rows are used instead — tagged
+   `DataSource="COVERS_PREDICTION_MARKET"`. These are real, live
+   probabilities from a nationwide-legal prediction market, just not from a
+   traditional sportsbook you can necessarily bet at (some are
+   exchange-style, not all are available in every state either). Prediction
+   markets quote a probability percentage (e.g. `o5.5 52%`) rather than
+   American odds; `_parse_prediction_market_odds()` in `scraper.py`
+   converts that percentage straight to American odds so it flows through
+   the exact same schema as everything else.
+3. Only if a whole *page* comes back with nothing usable from either source
+   (or the request fails outright) does the app fall back to the bundled
+   `sample_data.py`.
+
+The app's status banner and the grid's **Source** column both reflect which
+tier actually served each row, so it's always clear whether you're looking
+at a bettable sportsbook line, a prediction-market price, or illustrative
+demo data.
+
+## The fair-odds model (`model.py`)
+
+Every row's **Edge %** comes from `model.py`, not from the sportsbook's own
+number — a book's posted price already has its vig baked in, so treating
+it as "fair" would make every prop show 0% edge and defeat the point of the
+tool. Real de-vigging needs both sides of a market (Over *and* Under) from
+the *same* book, which Covers' one-pick-per-card layout doesn't expose, so
+`model.py` uses two practical stand-ins instead, applied per exact bet
+(same player, same market/side, same line):
+
+- **2+ sources price the same bet** (e.g. DraftKings *and* Bet365 both post
+  a number for the same Over/Under): their implied probabilities are
+  averaged. Independent books/markets set their vig independently, so
+  averaging several real, independent prices is a reasonable — though not
+  exact — stand-in for the vig-free "true" probability.
+- **Only 1 source prices the bet**: there's nothing to average against, so
+  a fixed assumed vig (`ASSUMED_SINGLE_SIDE_VIG`, 4.5% total — roughly what
+  a standard `-110`/`-110` two-sided market carries — halved to account for
+  a single side) is subtracted from that source's implied probability. This
+  is a documented assumption, not a measurement.
+
+**Edge % = (model's fair probability ÷ that row's own implied probability
+− 1) × 100.** Positive means the posted price implies a *lower* chance of
+winning than the model thinks is real — a good price for the bettor.
+Negative means the opposite. This applies identically to live Covers.com
+data and to `sample_data.py`'s demo data (each sample prop is priced at
+2-4 books, so most sample rows get real multi-source consensus too) — "Edge
+%" means the same thing no matter which data source is active.
 
 ### Required for real DraftKings/BetMGM/Bet365/theScore Bet odds: ScrapingBee geo-proxy
 
