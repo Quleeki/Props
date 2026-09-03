@@ -480,6 +480,24 @@ def fetch_covers_props(league: str, save_debug_html: bool = False) -> list[dict]
         file=sys.stderr,
     )
 
+    # Second-level diagnostic: 'picks-card' shows up in the raw text, but
+    # _parse_prop_cards() (which specifically looks for <section
+    # class="picks-card">) found nothing -- so find out what tag it's
+    # actually attached to, and dump the raw markup around the first hit,
+    # so we can see exactly what changed vs. the confirmed structure.
+    if raw_card_count:
+        debug_soup = BeautifulSoup(html, "lxml")
+        any_tag_matches = debug_soup.find_all(attrs={"class": lambda c: c and "picks-card" in c})
+        tag_names = sorted({t.name for t in any_tag_matches})
+        print(
+            f"[scraper] {league}: found 'picks-card' as a class on {len(any_tag_matches)} "
+            f"element(s), tag name(s): {tag_names}.",
+            file=sys.stderr,
+        )
+        first_idx = html.find("picks-card")
+        snippet = html[max(0, first_idx - 300): first_idx + 700]
+        print(f"[scraper] {league}: raw HTML around first 'picks-card' hit:\n{snippet}", file=sys.stderr)
+
     if save_debug_html:
         debug_dir = Path("debug_html")
         debug_dir.mkdir(exist_ok=True)
