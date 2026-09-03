@@ -1,7 +1,7 @@
 # EdgeFinder — NFL + CFB Prop Dashboard & Parlay Builder
 
 An interactive Streamlit dashboard for browsing NFL and CFB player props,
-filtering out WR/RB longshots priced worse than +125, sorting by edge/odds/
+filtering out WR/RB longshots priced worse than +300, sorting by edge/odds/
 position/kickoff, and pricing a live parlay ticket (with same-game
 correlation) as you check boxes.
 
@@ -170,12 +170,22 @@ credits per call than a plain fetch, so keep an eye on usage if you move to
 a paid plan — this was the cheaper alternative to Apify discussed when
 scoping the project, but geo-targeted residential proxying isn't free.
 
-## The +125 WR/RB longshot filter
+## The +300 WR/RB longshot filter
 
-`app.py` enforces (checkbox in the sidebar, on by default):
+`app.py` enforces (checkbox in the sidebar, on by default; threshold set by
+`WR_RB_LONGSHOT_CAP` at the top of `app.py`):
 
-> WR/RB props are dropped if their sportsbook odds are worse than +125.
+> WR/RB props are dropped if their sportsbook odds are worse than +300.
 > QB and TE props are never capped.
+
+(This was originally +125, but that cutoff was really only sane for
+Over/Under yardage and reception lines. Anytime TD scorer props are
+structurally plus-money — "will this specific skill player score a
+touchdown" routinely prices at +200 to +1000+ even for a team's clear
+top option — so a +125 cap was quietly dropping almost every WR/RB TD
+scorer prop. +300 gives real room for TD scorer markets while still
+filtering out the truly deep-longshot yardage/reception bets the rule was
+meant to catch.)
 
 ## Parlay pricing
 
