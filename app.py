@@ -1,11 +1,15 @@
 """
 EdgeFinder: NFL + CFB Player Prop Dashboard & Parlay Builder
 
-Pulls player prop lines (live from Covers.com when available, falling back
-to bundled sample data otherwise), filters out WR/RB longshots priced worse
-than +125, lets you filter/sort/search the slate, and prices a live parlay
-ticket -- including a same-game correlation boost -- as you check rows or
-remove them directly from the ticket.
+Pulls player prop lines -- preferring real sportsbook lines live from
+Covers.com, falling back to Covers' prediction-market pricing (Kalshi/
+Novig/etc) per-prop when your preferred books aren't available, and only
+falling all the way back to bundled sample data if Covers has nothing
+postable at all -- filters out WR/RB longshots priced worse than +125, lets
+you filter/sort/search the slate, and prices a live parlay ticket --
+including a same-game correlation boost -- as you check rows or remove them
+directly from the ticket. "Edge %" comes from model.py's fair-odds
+estimate, not the sportsbook's own number.
 """
 
 from __future__ import annotations
@@ -32,20 +36,41 @@ DISPLAY_COLUMNS = [
     "CoversLine",
     "SportsbookOdds",
     "Sportsbook",
+    "Source",
     "ModelFairOdds",
     "EdgePct",
     "InjuryStatus",
 ]
+
+# Friendly labels for the DataSource tag scraper.py/sample_data.py attach to
+# every row, shown as the "Source" column so it's obvious at a glance which
+# rows are a real bettable sportsbook line vs. prediction-market pricing
+# (see scraper.py's module docstring) vs. illustrative demo data.
+_SOURCE_LABELS = {
+    "COVERS": "Sportsbook",
+    "COVERS_PREDICTION_MARKET": "Prediction Mkt",
+    "SAMPLE": "Sample",
+}
 
 
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=900, show_spinner="Fetching the latest props...")
-def load_props_data() -> tuple[pd.DataFrame, bool]:
-    """Returns (dataframe, is_live). Tries the Covers.com scraper first;
-    falls back to bundled sample data if nothing comes back (e.g. lines
-    aren't posted yet for the upcoming slate)."""
+def load_props_data() -> tuple[pd.DataFrame, str]:
+    """Returns (dataframe, data_source). data_source describes the WORST
+    (least-preferred) source actually present in the returned data:
+
+      "COVERS" -- every row is a real sportsbook line from Covers.com.
+      "COVERS_PREDICTION_MARKET" -- at least one row (not necessarily all --
+          see the per-row "Source" column in the grid) came from Covers'
+          prediction-market fallback rather than a preferred sportsbook.
+      "SAMPLE" -- Covers returned nothing postable at all; bundled demo data.
+
+    Tries the Covers.com scraper first (which itself prefers real
+    sportsbook pricing per-prop and only falls back to prediction-market
+    pricing for props none of your books priced -- see scraper.py), and
+    only falls back to sample data if that returns nothing at all."""
     try:
         live_df = scraper.fetch_all_props()
     except Exception:
@@ -59,11 +84,19 @@ def load_props_data() -> tuple[pd.DataFrame, bool]:
         live_df = pd.DataFrame()
 
     if live_df is not None and not live_df.empty:
+        sources = set(live_df["DataSource"].unique()) if "DataSource" in live_df.columns else set()
+        if "COVERS_PREDICTION_MARKET" in sources:
+            print(
+                f"[app] loaded {len(live_df)} live row(s) from Covers.com "
+                "(some from prediction-market fallback).",
+                file=sys.stderr,
+            )
+            return live_df, "COVERS_PREDICTION_MARKET"
         print(f"[app] loaded {len(live_df)} live row(s) from Covers.com.", file=sys.stderr)
-        return live_df, True
+        return live_df, "COVERS"
 
     print("[app] no live rows -- falling back to sample data.", file=sys.stderr)
-    return sample_data.get_sample_data(), False
+    return sample_data.get_sample_data(), "SAMPLE"
 
 
 def apply_longshot_filter(df: pd.DataFrame, enforce: bool) -> pd.DataFrame:
@@ -73,6 +106,53 @@ def apply_longshot_filter(df: pd.DataFrame, enforce: bool) -> pd.DataFrame:
         return df
     is_longshot_skill_position = df["Position"].isin(["WR", "RB"]) & (df["SportsbookOdds"] > 125)
     return df[~is_longshot_skill_position].reset_index(drop=True)
+
+
+def best_line_per_prop(df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse multiple sportsbooks' rows for the same prop down to just
+    the single most favorable line for the bettor -- e.g. if DraftKings has
+    a QB's Passing Yards Over at 218.5 and Bet365 has it at 225.5, only the
+    DraftKings row (the easier Over) is shown in the slate. 'Best' means
+    the lowest line for an Over and the highest line for an Under; props
+    with no explicit Over/Under side in their name (sample data, and the
+    Anytime TD moneyline convention) instead keep whichever row has the
+    better sportsbook odds. Ties are broken the same way.
+
+    This only changes what's displayed -- the full multi-book data (what
+    this function is called on) is still what backs the "best single book
+    for your whole parlay" comparison down in the parlay ticket, since that
+    logic works off `capped_df` directly, not this collapsed view."""
+    if df.empty:
+        return df
+    group_cols = [c for c in ("Player", "PropType", "Game", "GameTime") if c in df.columns]
+    if not group_cols or "CoversLine" not in df.columns or "SportsbookOdds" not in df.columns:
+        return df
+
+    prop_type_pos = group_cols.index("PropType") if "PropType" in group_cols else None
+
+    def _pick_best_index(group: pd.DataFrame):
+        # NOTE: pandas excludes the groupby columns themselves from `group`
+        # here, so PropType (one of group_cols) isn't a column on `group` --
+        # read it from the group key (`group.name`) instead.
+        if prop_type_pos is None:
+            prop_type = ""
+        elif isinstance(group.name, tuple):
+            prop_type = str(group.name[prop_type_pos]).lower()
+        else:
+            prop_type = str(group.name).lower()
+
+        if "(under)" in prop_type:
+            best_line = group["CoversLine"].max()
+        elif "(over)" in prop_type:
+            best_line = group["CoversLine"].min()
+        else:
+            best_line = None  # no explicit side -- fall through to odds-only tie-break
+
+        candidates = group[group["CoversLine"] == best_line] if best_line is not None else group
+        return candidates["SportsbookOdds"].idxmax()
+
+    best_indices = df.groupby(group_cols, dropna=False, sort=False).apply(_pick_best_index)
+    return df.loc[best_indices.values]
 
 
 def _clear_player_search() -> None:
@@ -88,7 +168,7 @@ st.caption(
     "and see live combined odds with same-game correlation pricing."
 )
 
-df, is_live = load_props_data()
+df, data_source = load_props_data()
 
 col_refresh, col_status = st.columns([1, 5])
 with col_refresh:
@@ -96,8 +176,19 @@ with col_refresh:
         load_props_data.clear()
         st.rerun()
 with col_status:
-    if is_live:
+    if data_source == "COVERS":
         st.success("Showing live lines scraped from Covers.com.", icon="✅")
+    elif data_source == "COVERS_PREDICTION_MARKET":
+        n_pred = int((df["DataSource"] == "COVERS_PREDICTION_MARKET").sum()) if "DataSource" in df.columns else 0
+        st.info(
+            f"Showing live Covers.com lines -- {n_pred} of {len(df)} row(s) came from "
+            "prediction-market pricing (Kalshi/Novig/Polymarket/etc, see the **Source** column) "
+            "instead of your preferred sportsbooks, likely because this scrape's proxy IP didn't "
+            "land in a state carrying DraftKings/BetMGM/Bet365/theScore Bet. These are still "
+            "real, live market prices -- just not from a traditional sportsbook. Click Refresh "
+            "to try again.",
+            icon="🔀",
+        )
     else:
         st.warning(
             "Covers.com didn't return any postable lines right now (common in the offseason/"
@@ -190,6 +281,16 @@ if player_search.strip():
 
 working_df = working_df.sort_values(by=sort_label_map[sort_label], ascending=sort_ascending)
 
+# Collapse each prop down to just its single best line for display (see
+# best_line_per_prop docstring) -- e.g. don't show both "218.5 DraftKings"
+# and "225.5 Bet365" rows for the same QB's Passing Yards Over; just the
+# easier 218.5 one. The full multi-book working_df/capped_df is untouched
+# and still what the parlay ticket's cross-book matching uses.
+display_df = best_line_per_prop(working_df)
+if "DataSource" in display_df.columns:
+    display_df = display_df.copy()
+    display_df["Source"] = display_df["DataSource"].map(_SOURCE_LABELS).fillna(display_df["DataSource"])
+
 # ---------------------------------------------------------------------------
 # Parlay selection state
 # ---------------------------------------------------------------------------
@@ -207,11 +308,15 @@ st.session_state.parlay_leg_ids &= set(capped_df.index)
 # ---------------------------------------------------------------------------
 # Main grid
 # ---------------------------------------------------------------------------
-st.subheader(f"📋 Filtered Slate ({len(working_df)} plays)")
+st.subheader(f"📋 Filtered Slate ({len(display_df)} plays)")
 st.write("Check the boxes on the left to add plays to your parlay ticket below.")
+st.caption(
+    "Showing each prop's single best line across your selected sportsbooks. "
+    "Add a leg to the parlay ticket below to see which other books carry it too."
+)
 
-non_select_cols = [c for c in DISPLAY_COLUMNS if c != "Select" and c in working_df.columns]
-grid_df = working_df[non_select_cols].copy()
+non_select_cols = [c for c in DISPLAY_COLUMNS if c != "Select" and c in display_df.columns]
+grid_df = display_df[non_select_cols].copy()
 grid_df.insert(0, "Select", grid_df.index.isin(st.session_state.parlay_leg_ids))
 
 edited_df = st.data_editor(
@@ -223,6 +328,7 @@ edited_df = st.data_editor(
         "Game": st.column_config.TextColumn("Game"),
         "CoversLine": st.column_config.NumberColumn("Line", format="%.1f"),
         "SportsbookOdds": st.column_config.NumberColumn("SB Odds", format="%+d"),
+        "Source": st.column_config.TextColumn("Source", help="Sportsbook = real book odds. Prediction Mkt = Covers' fallback pricing when none of your preferred books had this prop (see banner above). Sample = demo data."),
         "ModelFairOdds": st.column_config.NumberColumn("Model", format="%+d"),
         "EdgePct": st.column_config.NumberColumn("Edge %", format="%.1f%%"),
         "PropType": st.column_config.TextColumn("Prop Type"),
