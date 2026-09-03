@@ -5,8 +5,9 @@ Pulls player prop lines -- preferring real sportsbook lines live from
 Covers.com, falling back to Covers' prediction-market pricing (Kalshi/
 Novig/etc) per-prop when your preferred books aren't available, and only
 falling all the way back to bundled sample data if Covers has nothing
-postable at all -- filters out WR/RB longshots priced worse than +125, lets
-you filter/sort/search the slate, and prices a live parlay ticket --
+postable at all -- filters out WR/RB longshots priced worse than
+WR_RB_LONGSHOT_CAP, lets you filter/sort/search the slate, and prices a
+live parlay ticket --
 including a same-game correlation boost -- as you check rows or remove them
 directly from the ticket. "Edge %" comes from model.py's fair-odds
 estimate, not the sportsbook's own number.
@@ -41,6 +42,15 @@ DISPLAY_COLUMNS = [
     "EdgePct",
     "InjuryStatus",
 ]
+
+# WR/RB props priced worse (more positive) than this are dropped by
+# apply_longshot_filter() when the sidebar cap is enforced. Raised from the
+# original +125 to +300 -- +125 was cutting out almost every WR/RB Anytime
+# TD scorer prop, since "will this specific skill player score a TD" bets
+# are structurally plus-money (typically +200 to +1000+) rather than true
+# yardage-style longshots; +125 was really only ever a sane ceiling for
+# Over/Under yardage/reception lines, not moneyline-style props.
+WR_RB_LONGSHOT_CAP = 300
 
 # Friendly labels for the DataSource tag scraper.py/sample_data.py attach to
 # every row, shown as the "Source" column so it's obvious at a glance which
@@ -100,11 +110,12 @@ def load_props_data() -> tuple[pd.DataFrame, str]:
 
 
 def apply_longshot_filter(df: pd.DataFrame, enforce: bool) -> pd.DataFrame:
-    """Enforces that WR/RB props priced above +125 are dropped, while QB/TE
-    pricing stays unrestricted -- the core filtering rule from the spec."""
+    """Enforces that WR/RB props priced above WR_RB_LONGSHOT_CAP are
+    dropped, while QB/TE pricing stays unrestricted -- the core filtering
+    rule from the spec."""
     if not enforce or df.empty:
         return df
-    is_longshot_skill_position = df["Position"].isin(["WR", "RB"]) & (df["SportsbookOdds"] > 125)
+    is_longshot_skill_position = df["Position"].isin(["WR", "RB"]) & (df["SportsbookOdds"] > WR_RB_LONGSHOT_CAP)
     return df[~is_longshot_skill_position].reset_index(drop=True)
 
 
@@ -208,8 +219,8 @@ if df.empty:
 st.sidebar.header("🎯 Filters")
 
 enforce_cap = st.sidebar.checkbox(
-    "Enforce WR/RB +125 longshot cap", value=True,
-    help="Drops WR/RB props priced worse than +125. QB and TE props are never capped.",
+    f"Enforce WR/RB +{WR_RB_LONGSHOT_CAP} longshot cap", value=True,
+    help=f"Drops WR/RB props priced worse than +{WR_RB_LONGSHOT_CAP}. QB and TE props are never capped.",
 )
 
 leagues = sorted(df["League"].dropna().unique().tolist())
@@ -261,7 +272,7 @@ correlation_multiplier = st.sidebar.slider(
 # ---------------------------------------------------------------------------
 # Apply filters
 # ---------------------------------------------------------------------------
-# capped_df keeps the WR/RB +125 rule (a data-integrity rule) but NOT the
+# capped_df keeps the WR/RB longshot rule (a data-integrity rule) but NOT the
 # view-only sidebar filters below -- it's the search space for "which
 # sportsbook has every selected leg", so an unrelated league/position/book
 # filter toggle doesn't hide a book that actually has your full parlay. Its
